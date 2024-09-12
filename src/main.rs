@@ -235,10 +235,21 @@ fn launch_apps(config: &Config, env: &str, force: bool) -> io::Result<()> {
                 continue;
             }
             println!("Launching: {}", app);
-            ProcessCommand::new("gtk-launch")
-                .arg(app)
-                .spawn()
-                .expect("Failed to launch application");
+            let mut command = ProcessCommand::new("gtk-launch");
+            command.arg(app);
+
+            // Redirect stdout and stderr to /dev/null
+            command.stdout(Stdio::null());
+            command.stderr(Stdio::null());
+
+            // Set DISPLAY environment variable for Electron apps
+            command.env("DISPLAY", ":0");
+
+            // Spawn the process in the background
+            match command.spawn() {
+                Ok(_) => info!("Launched {} in the background", app),
+                Err(e) => error!("Failed to launch {}: {}", app, e),
+            }
         }
         info!("Launched apps for environment: {}", env);
     } else {
