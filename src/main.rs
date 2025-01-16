@@ -25,6 +25,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[clap(about = "Lists all available applications")]
+    List,
+
+    #[clap(about = "Lists all applications in system startup folders")]
+    StartupList,
+
     #[clap(about = "Shows the current configuration")]
     Show,
 
@@ -79,6 +85,18 @@ fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
+        Commands::List => {
+            println!("Available applications:");
+            for app in platform::find_available_apps() {
+                println!("  - {}", app);
+            }
+        }
+        Commands::StartupList => {
+            println!("System startup applications:");
+            for app in platform::find_startup_apps() {
+                println!("  - {}", app);
+            }
+        }
         Commands::Show => show_config(&config),
         Commands::Launch { env, force } => {
             handle_launch_command(&config, env, *force)?;
@@ -111,11 +129,7 @@ fn handle_edit_command(
         return Ok(false);
     }
 
-    let app_available = if app.ends_with(".desktop") {
-        platform::is_desktop_file_available(app)
-    } else {
-        platform::is_command_available(app)
-    };
+    let app_available = platform::is_desktop_file_available(app) || platform::is_command_available(app);
 
     if !app_available {
         println!(
@@ -130,11 +144,12 @@ fn handle_edit_command(
                 .environments
                 .entry(env.to_string())
                 .or_insert_with(Vec::new);
-            if apps.contains(&app.to_string()) {
-                error!("Application '{}' is already in environment '{}'", app, env);
+            let normalized_app = platform::strip_platform_extension(app);
+            if apps.iter().any(|a| platform::strip_platform_extension(a) == normalized_app) {
+                error!("Application '{}' is already in environment '{}'", normalized_app, env);
                 return Ok(false);
             }
-            apps.push(app.to_string());
+            apps.push(normalized_app.to_string());
             println!("Added '{}' to environment '{}'", app, env);
             info!("Added '{}' to environment '{}'", app, env);
         }
@@ -205,24 +220,37 @@ fn launch_apps(config: &Config, env: &str, force: bool) -> io::Result<()> {
                 continue;
             }
             println!("Launching: {}", app);
-            let mut command = if cfg!(target_os = "windows") {
-                let mut cmd = ProcessCommand::new("cmd");
-                cmd.args(["/C", "start", "", app]);
-                cmd
-            } else {
-                let mut cmd = ProcessCommand::new("gtk-launch");
-                cmd.arg(app);
-                cmd.env("DISPLAY", ":0");
-                cmd
-            };
+            match platform::find_app_path(app) {
+                Some(app_path) => {
+                    let mut command = if cfg!(target_os = "windows") {
+                        let mut cmd = ProcessCommand::new("cmd");
+                        cmd.args(["/C", "start", "", &app_path]);
+                        cmd
+                    } else {
+                        let mut cmd = ProcessCommand::new("gtk-launch");
+                        cmd.arg(&app_path);
+                        cmd.env("DISPLAY", ":0");
+                        cmd
+                    };
 
-            command.stdout(Stdio::null());
-            command.stderr(Stdio::null());
+                    command.stdout(Stdio::null());
+                    command.stderr(Stdio::null());
 
-            // Spawn the process in the background
-            match command.spawn() {
-                Ok(_) => info!("Launched {} in the background", app),
-                Err(e) => error!("Failed to launch {}: {}", app, e),
+                    match command.spawn() {
+                        Ok(_) => {
+                            println!("Launched: {}", app);
+                            info!("Launched {} in the background", app);
+                        }
+                        Err(e) => {
+                            println!("Failed to launch {}: {}", app, e);
+                            error!("Failed to launch {}: {}", app, e);
+                        }
+                    }
+                }
+                None => {
+                    println!("Could not find application '{}'. Make sure it is installed correctly.", app);
+                    error!("Could not find application path for '{}'", app);
+                }
             }
         }
         info!("Launched apps for environment: {}", env);

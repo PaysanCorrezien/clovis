@@ -33,16 +33,16 @@ pub fn generate_config(config_path: &PathBuf) -> io::Result<()> {
             (
                 "personal".to_string(),
                 vec![
-                    "firefox.desktop".to_string(),
-                    "thunderbird.desktop".to_string(),
+                    "firefox".to_string(),
+                    "thunderbird".to_string(),
                     "gedit".to_string(),
                 ],
             ),
             (
                 "work".to_string(),
                 vec![
-                    "google-chrome.desktop".to_string(),
-                    "slack.desktop".to_string(),
+                    "chrome".to_string(),
+                    "slack".to_string(),
                     "code".to_string(),
                 ],
             ),
