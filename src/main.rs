@@ -63,9 +63,25 @@ enum Commands {
 
     #[clap(about = "Generates a base example configuration")]
     Generate,
+
+    #[clap(about = "Creates a desktop entry for the specified environment")]
+    CreateDesktop {
+        #[clap(help = "The name of the environment to create a desktop entry for")]
+        env: String,
+    },
 }
 
 fn main() -> io::Result<()> {
+    fn create_desktop(config: &Config, env: &str) -> io::Result<()> {
+        if !config.environments.contains_key(env) {
+            println!("Environment '{}' not found.", env);
+            return Ok(());
+        }
+
+        platform::create_desktop_entry(env)?;
+        println!("Desktop entry created for environment '{}'.", env);
+        Ok(())
+    }
     SimpleLogger::new().init().unwrap();
     info!("Starting application");
 
@@ -112,6 +128,9 @@ fn main() -> io::Result<()> {
         Commands::Config => open_config_in_editor(&config_path)?,
         Commands::Generate => {
             generate_config(&config_path)?;
+        }
+        Commands::CreateDesktop { env } => {
+            create_desktop(&config, env)?;
         }
     }
 

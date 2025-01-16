@@ -1,4 +1,5 @@
 // src/platform.rs
+use std::io;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -35,7 +36,10 @@ pub fn find_app_path(app: &str) -> Option<String> {
             "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs".to_string(),
             "C:\\Users\\Public\\Desktop".to_string(),
             format!("{}\\Desktop", user_profile),
-            format!("{}\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs", user_profile),
+            format!(
+                "{}\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs",
+                user_profile
+            ),
             format!("{}\\Start Menu\\Programs", user_profile),
         ];
 
@@ -208,15 +212,104 @@ fn get_windows_window_titles() -> Vec<String> {
     titles
 }
 
+pub fn create_desktop_entry(env: &str) -> std::io::Result<()> {
+    if cfg!(target_os = "windows") {
+        create_windows_desktop_entry(env)
+    } else {
+        create_linux_desktop_entry(env)
+    }
+}
+
+fn create_windows_desktop_entry(env: &str) -> std::io::Result<()> {
+    let desktop_path = format!(
+        "{}\\Desktop\\Clovis {}.lnk",
+        std::env::var("USERPROFILE").unwrap_or_default(),
+        env
+    );
+
+    let current_exe = std::env::current_exe()?;
+    let target_path = current_exe.to_str().unwrap_or("clovis.exe");
+    
+    let icon_path = std::env::current_dir()?
+        .join(".assets")
+        .join("icon.ico")
+        .to_str()
+        .unwrap_or("")
+        .to_string();
+
+    // Create PowerShell script to make a proper Windows shortcut
+    let ps_script = format!(
+        r#"
+$WshShell = New-Object -comObject WScript.Shell
+$Shortcut = $WshShell.CreateShortcut("{}")
+$Shortcut.TargetPath = "{}"
+$Shortcut.Arguments = "launch {}"
+$Shortcut.IconLocation = "{}"
+$Shortcut.Save()
+"#,
+        desktop_path.replace("\\", "\\\\"),
+        target_path.replace("\\", "\\\\"),
+        env,
+        icon_path.replace("\\", "\\\\")
+    );
+
+    // Execute the PowerShell script
+    let status = Command::new("powershell")
+        .arg("-Command")
+        .arg(&ps_script)
+        .status()?;
+
+    if !status.success() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "Failed to create shortcut"
+        ));
+    }
+
+    Ok(())
+}
+
+fn create_linux_desktop_entry(env: &str) -> std::io::Result<()> {
+    let desktop_path = format!(
+        "{}/Desktop/clovis-{}.desktop",
+        std::env::var("HOME").unwrap_or_default(),
+        env
+    );
+
+    let icon_path = std::env::current_dir()?
+        .join(".assets")
+        .join("icon.ico")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let desktop_entry = r#"
+    [Desktop Entry]
+    Version=1.0
+    Name=Clovis {}
+    Exec=clovis launch {}
+    Icon={}
+    Type=Application
+    Terminal=false
+    "#
+    .replace("{}", env)
+    .replace("{}", env)
+    .replace("{}", &icon_path);
+
+    std::fs::write(desktop_path, desktop_entry)?;
+    Ok(())
+}
+
 pub fn is_app_running(app: &str) -> bool {
     if cfg!(target_os = "windows") {
         let app_name = strip_platform_extension(app).to_lowercase();
-        
+
         // Check window titles first
         let window_titles = get_windows_window_titles();
-        if window_titles.iter().any(|title| {
-            title.contains(&app_name) || app_name.contains(title)
-        }) {
+        if window_titles
+            .iter()
+            .any(|title| title.contains(&app_name) || app_name.contains(title))
+        {
             return true;
         }
 
@@ -241,12 +334,9 @@ pub fn is_app_running(app: &str) -> bool {
         false
     } else {
         let app_name = strip_platform_extension(app).to_lowercase();
-        
+
         // Check window titles using wmctrl
-        if let Ok(output) = Command::new("wmctrl")
-            .arg("-l")
-            .output()
-        {
+        if let Ok(output) = Command::new("wmctrl").arg("-l").output() {
             if let Ok(output_str) = String::from_utf8(output.stdout) {
                 for line in output_str.lines() {
                     let window_title = line.to_lowercase();
@@ -258,11 +348,7 @@ pub fn is_app_running(app: &str) -> bool {
         }
 
         // Fallback to process check
-        if let Ok(output) = Command::new("pgrep")
-            .arg("-f")
-            .arg(&app_name)
-            .output()
-        {
+        if let Ok(output) = Command::new("pgrep").arg("-f").arg(&app_name).output() {
             if !output.stdout.is_empty() {
                 return true;
             }
