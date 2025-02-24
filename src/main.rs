@@ -1,4 +1,9 @@
+// At the top of your file with other imports:
+// At the top with other imports
+use clap::{value_parser, Command, CommandFactory};
+use clap_complete::{generate, Generator, Shell};
 use std::collections::HashMap;
+
 use std::io::{self};
 use std::path::PathBuf;
 use std::process::{Command as ProcessCommand, Stdio};
@@ -7,10 +12,10 @@ use clap::{Parser, Subcommand};
 use log::{error, info};
 use simple_logger::SimpleLogger;
 
-mod platform;
 mod config;
+mod platform;
 
-use config::{Config, generate_config, load_config, save_config, show_config, validate_config};
+use config::{generate_config, load_config, save_config, show_config, validate_config, Config};
 
 #[derive(Parser)]
 #[clap(
@@ -68,6 +73,11 @@ enum Commands {
     CreateDesktop {
         #[clap(help = "The name of the environment to create a desktop entry for")]
         env: String,
+    },
+    #[clap(about = "Generates shell completions")]
+    Completions {
+        #[clap(long = "generate", value_parser = value_parser!(Shell))]
+        shell: Shell,
     },
 }
 
@@ -132,6 +142,12 @@ fn main() -> io::Result<()> {
         Commands::CreateDesktop { env } => {
             create_desktop(&config, env)?;
         }
+        // In your main match statement:
+        Commands::Completions { shell } => {
+            let mut cmd = Cli::command();
+            eprintln!("Generating completion file for {shell}...");
+            print_completions(*shell, &mut cmd);
+        }
     }
 
     Ok(())
@@ -148,7 +164,8 @@ fn handle_edit_command(
         return Ok(false);
     }
 
-    let app_available = platform::is_desktop_file_available(app) || platform::is_command_available(app);
+    let app_available =
+        platform::is_desktop_file_available(app) || platform::is_command_available(app);
 
     if !app_available {
         println!(
@@ -164,8 +181,14 @@ fn handle_edit_command(
                 .entry(env.to_string())
                 .or_insert_with(Vec::new);
             let normalized_app = platform::strip_platform_extension(app);
-            if apps.iter().any(|a| platform::strip_platform_extension(a) == normalized_app) {
-                error!("Application '{}' is already in environment '{}'", normalized_app, env);
+            if apps
+                .iter()
+                .any(|a| platform::strip_platform_extension(a) == normalized_app)
+            {
+                error!(
+                    "Application '{}' is already in environment '{}'",
+                    normalized_app, env
+                );
                 return Ok(false);
             }
             apps.push(normalized_app.to_string());
@@ -267,7 +290,10 @@ fn launch_apps(config: &Config, env: &str, force: bool) -> io::Result<()> {
                     }
                 }
                 None => {
-                    println!("Could not find application '{}'. Make sure it is installed correctly.", app);
+                    println!(
+                        "Could not find application '{}'. Make sure it is installed correctly.",
+                        app
+                    );
                     error!("Could not find application path for '{}'", app);
                 }
             }
@@ -277,3 +303,6 @@ fn launch_apps(config: &Config, env: &str, force: bool) -> io::Result<()> {
     Ok(())
 }
 
+fn print_completions<G: Generator>(gen: G, cmd: &mut Command) {
+    generate(gen, cmd, cmd.get_name().to_string(), &mut io::stdout());
+}

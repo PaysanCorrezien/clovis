@@ -10,3 +10,4 @@ serde_yaml = "0.8"
 log = "0.4"
 simple_logger = "1.11.0"
 clap = { version = "4.0", features = ["derive"] }
+clap_complete = "4.0"
