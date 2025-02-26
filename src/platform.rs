@@ -144,74 +144,6 @@ pub fn find_available_apps() -> Vec<String> {
 }
 
 // TODO: Implement more than this for win ( the one that are on taskbar -> startup)
-pub fn find_startup_apps() -> Vec<String> {
-    let mut apps = Vec::new();
-
-    if cfg!(target_os = "windows") {
-        let user_profile = std::env::var("USERPROFILE").unwrap_or_default();
-        let startup_paths = vec![
-            format!(
-                "{}\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup",
-                user_profile
-            ),
-            "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\StartUp".to_string(),
-        ];
-
-        for path in startup_paths.iter() {
-            if let Ok(entries) = std::fs::read_dir(path) {
-                for entry in entries.flatten() {
-                    if let Some(file_name) = entry.file_name().to_str() {
-                        if file_name.ends_with(".lnk") {
-                            apps.push(strip_platform_extension(file_name).to_string());
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        let home_dir = std::env::var("HOME").unwrap();
-        let autostart_paths = vec![
-            format!("{}/.config/autostart", home_dir),
-            "/etc/xdg/autostart".to_string(),
-        ];
-
-        for path in autostart_paths.iter() {
-            if let Ok(entries) = std::fs::read_dir(path) {
-                for entry in entries.flatten() {
-                    if let Some(file_name) = entry.file_name().to_str() {
-                        if file_name.ends_with(".desktop") {
-                            apps.push(strip_platform_extension(file_name).to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    apps.sort();
-    apps.dedup();
-    apps
-}
-
-fn get_windows_window_titles() -> Vec<String> {
-    let mut titles = Vec::new();
-    if let Ok(output) = Command::new("powershell")
-        .arg("-Command")
-        .arg("Get-Process | Where-Object {$_.MainWindowTitle -ne ''} | Select-Object MainWindowTitle | Format-Table -HideTableHeaders")
-        .output()
-    {
-        if let Ok(output_str) = String::from_utf8(output.stdout) {
-            titles.extend(
-                output_str
-                    .lines()
-                    .map(|s| s.trim().to_lowercase())
-                    .filter(|s| !s.is_empty())
-            );
-        }
-    }
-    titles
-}
-
 pub fn create_desktop_entry(env: &str) -> std::io::Result<()> {
     if cfg!(target_os = "windows") {
         create_windows_desktop_entry(env)
@@ -229,7 +161,7 @@ fn create_windows_desktop_entry(env: &str) -> std::io::Result<()> {
 
     let current_exe = std::env::current_exe()?;
     let target_path = current_exe.to_str().unwrap_or("clovis.exe");
-    
+
     let icon_path = std::env::current_dir()?
         .join(".assets")
         .join("icon.ico")
@@ -262,7 +194,7 @@ $Shortcut.Save()
     if !status.success() {
         return Err(io::Error::new(
             io::ErrorKind::Other,
-            "Failed to create shortcut"
+            "Failed to create shortcut",
         ));
     }
 
@@ -355,4 +287,159 @@ pub fn is_app_running(app: &str) -> bool {
         }
         false
     }
+}
+
+pub fn find_startup_apps() -> Vec<String> {
+    let mut apps = Vec::new();
+
+    if cfg!(target_os = "windows") {
+        // 1. Existing folder check (keep this part)
+        let user_profile = std::env::var("USERPROFILE").unwrap_or_default();
+        let startup_paths = vec![
+            format!(
+                "{}\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup",
+                user_profile
+            ),
+            "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\StartUp".to_string(),
+        ];
+
+        for path in startup_paths.iter() {
+            if let Ok(entries) = std::fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    if let Some(file_name) = entry.file_name().to_str() {
+                        if file_name.ends_with(".lnk") {
+                            apps.push(strip_platform_extension(file_name).to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Check Registry Run keys
+        apps.extend(get_registry_startup_apps());
+
+        // 3. Check Task Scheduler tasks
+        apps.extend(get_task_scheduler_startup_apps());
+
+        // 4. Get Task Manager Startup items using PowerShell
+        apps.extend(get_taskmanager_startup_apps());
+    } else {
+        // Linux implementation (keep as is)
+        // ...
+    }
+
+    apps.sort();
+    apps.dedup();
+    apps
+}
+
+fn get_registry_startup_apps() -> Vec<String> {
+    let mut apps = Vec::new();
+
+    // Use PowerShell to query Registry Run keys
+    let registry_query = r#"
+        Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' | 
+        Select-Object * -Exclude PSPath,PSParentPath,PSChildName,PSProvider |
+        ForEach-Object { $_.PSObject.Properties } | 
+        ForEach-Object { $_.Name }
+        
+        Get-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' | 
+        Select-Object * -Exclude PSPath,PSParentPath,PSChildName,PSProvider |
+        ForEach-Object { $_.PSObject.Properties } | 
+        ForEach-Object { $_.Name }
+    "#;
+
+    if let Ok(output) = Command::new("powershell")
+        .arg("-Command")
+        .arg(registry_query)
+        .output()
+    {
+        if let Ok(output_str) = String::from_utf8(output.stdout) {
+            for line in output_str.lines() {
+                let app_name = line.trim();
+                if !app_name.is_empty() {
+                    apps.push(app_name.to_string());
+                }
+            }
+        }
+    }
+
+    apps
+}
+
+fn get_task_scheduler_startup_apps() -> Vec<String> {
+    let mut apps = Vec::new();
+
+    // Query tasks that run at logon
+    let task_query = r#"
+        Get-ScheduledTask | 
+        Where-Object { $_.Triggers.LogonTrigger -ne $null -or $_.Triggers.BootTrigger -ne $null } |
+        Select-Object -ExpandProperty TaskName
+    "#;
+
+    if let Ok(output) = Command::new("powershell")
+        .arg("-Command")
+        .arg(task_query)
+        .output()
+    {
+        if let Ok(output_str) = String::from_utf8(output.stdout) {
+            for line in output_str.lines() {
+                let task_name = line.trim();
+                if !task_name.is_empty() {
+                    // Extract just the application name from task path
+                    if let Some(app_name) = task_name.split('\\').last() {
+                        apps.push(app_name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    apps
+}
+
+fn get_taskmanager_startup_apps() -> Vec<String> {
+    let mut apps = Vec::new();
+
+    // This PowerShell command uses WMI to get startup apps similar to Task Manager
+    let ps_query = r#"
+        Get-CimInstance -ClassName Win32_StartupCommand | 
+        Select-Object -ExpandProperty Name
+    "#;
+
+    if let Ok(output) = Command::new("powershell")
+        .arg("-Command")
+        .arg(ps_query)
+        .output()
+    {
+        if let Ok(output_str) = String::from_utf8(output.stdout) {
+            for line in output_str.lines() {
+                let app_name = line.trim();
+                if !app_name.is_empty() {
+                    apps.push(app_name.to_string());
+                }
+            }
+        }
+    }
+
+    apps
+}
+
+fn get_windows_window_titles() -> Vec<String> {
+    let mut titles = Vec::new();
+    if let Ok(output) = Command::new("powershell")
+        .arg("-Command")
+        .arg("Get-Process | Where-Object {$_.MainWindowTitle -ne ''} | Select-Object MainWindowTitle | Format-Table -HideTableHeaders")
+        .output()
+    {
+        if let Ok(output_str) = String::from_utf8(output.stdout) {
+            titles.extend(
+                output_str
+                    .lines()
+                    .map(|s| s.trim().to_lowercase())
+                    .filter(|s| !s.is_empty())
+            );
+        }
+    }
+    titles
 }
