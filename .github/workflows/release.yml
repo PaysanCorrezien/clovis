@@ -1,0 +1,118 @@
+# .github/workflows/release.yml
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-unix:
+    name: Build Linux (x86_64 + ARM64)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            gcc: ""
+            linker: ""
+          - target: aarch64-unknown-linux-gnu
+            gcc: gcc-aarch64-linux-gnu
+            linker: aarch64-linux-gnu-gcc
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install linker (ARM only)
+        if: matrix.gcc != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.gcc }}
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build
+        shell: bash
+        run: |
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=${{ matrix.linker }}
+          fi
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          ZIP="clovis-${{ github.ref_name }}-${{ matrix.target }}.zip"
+          BIN="target/${{ matrix.target }}/release/clovis"
+          mkdir -p dist
+          cp "$BIN" "dist/clovis"
+          zip -j "dist/$ZIP" "dist/clovis"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: clovis-${{ github.ref_name }}-${{ matrix.target }}.zip
+          path: dist/clovis-${{ github.ref_name }}-${{ matrix.target }}.zip
+
+  build-windows:
+    name: Build Windows (x86_64 + ARM64)
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+          - target: aarch64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $ZIP = "clovis-${{ github.ref_name }}-${{ matrix.target }}.zip"
+          mkdir pkg
+          Copy-Item "target\${{ matrix.target }}\release\clovis.exe" pkg\
+          Compress-Archive -Path pkg\clovis.exe -DestinationPath "dist\$ZIP"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: clovis-${{ github.ref_name }}-${{ matrix.target }}.zip
+          path: dist/clovis-${{ github.ref_name }}-${{ matrix.target }}.zip
+
+  release:
+    name: Draft GitHub Release
+    needs: [build-unix, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install git-cliff
+        run: cargo install git-cliff --locked
+
+      - name: Generate CHANGELOG.md
+        run: git-cliff --output CHANGELOG.md
+
+      - name: Download all artifacts into dist/
+        uses: actions/download-artifact@v4
+        with:
+          # pull every zip into dist/
+          path: dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          body_path: CHANGELOG.md
+          files: |
+            dist/*.zip

@@ -1,10 +1,9 @@
 // src/platform.rs
 use std::io;
-use std::path::Path;
 use std::process::{Command, Stdio};
 use std::{
     env,
-    path::{PathBuf},
+    path::PathBuf,
 };
 
 pub fn is_command_available(cmd: &str) -> bool {
@@ -28,7 +27,7 @@ pub fn is_command_available(cmd: &str) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn get_windows_search_paths() -> Vec<PathBuf> {
+fn get_search_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let user_profile = env::var("USERPROFILE").unwrap_or_default();
     
@@ -52,7 +51,7 @@ fn get_windows_search_paths() -> Vec<PathBuf> {
 
     // WindowsApps container
     if let Ok(pf) = env::var("ProgramFiles") {
-        let windows_apps = Path::new(&pf).join("WindowsApps");
+        let windows_apps = PathBuf::from(pf).join("WindowsApps");
         if windows_apps.exists() {
             paths.push(windows_apps);
         }
@@ -61,6 +60,28 @@ fn get_windows_search_paths() -> Vec<PathBuf> {
     // PATH environment variable
     if let Ok(path_var) = env::var("PATH") {
         paths.extend(path_var.split(';').map(PathBuf::from));
+    }
+
+    paths
+}
+
+#[cfg(not(target_os = "windows"))]
+fn get_search_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let home_dir = env::var("HOME").unwrap_or_default();
+
+    // XDG-standard launcher locations
+    paths.extend([
+        PathBuf::from("/usr/share/applications"),
+        PathBuf::from("/usr/local/share/applications"),
+        PathBuf::from(format!("{home_dir}/.local/share/applications")),
+        PathBuf::from("/run/current-system/sw/share/applications"),
+        PathBuf::from(format!("{home_dir}/.nix-profile/share/applications")),
+    ]);
+
+    // Directories in $PATH (split on ':')
+    if let Ok(path_var) = env::var("PATH") {
+        paths.extend(path_var.split(':').map(PathBuf::from));
     }
 
     paths
@@ -87,7 +108,7 @@ pub fn find_app_path(app: &str) -> Option<PathBuf> {
         };
 
         // Get all possible search paths
-        let search_paths = get_windows_search_paths();
+        let search_paths = get_search_paths();
 
         // Search through all paths
         for dir in search_paths {
@@ -104,10 +125,6 @@ pub fn find_app_path(app: &str) -> Option<PathBuf> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        use std::ffi::OsStr;
-
-        let mut candidates = Vec::<PathBuf>::new();
-
         // 1. "desktop-file" launcher (XDG)
         let desktop_name = if app.ends_with(".desktop") {
             app.to_owned()
@@ -118,29 +135,13 @@ pub fn find_app_path(app: &str) -> Option<PathBuf> {
         // 2. raw executable name (as given)
         let exec_name = app.to_owned();
 
-        // ---------- build search directories ----------
-        let home_dir = env::var("HOME").unwrap_or_default();
+        // Get all possible search paths
+        let search_paths = get_search_paths();
 
-        // XDG-standard launcher locations
-        candidates.extend([
-            PathBuf::from("/usr/share/applications"),
-            PathBuf::from("/usr/local/share/applications"),
-            PathBuf::from(format!("{home_dir}/.local/share/applications")),
-            PathBuf::from("/run/current-system/sw/share/applications"),
-            PathBuf::from(format!("{home_dir}/.nix-profile/share/applications")),
-        ]);
-
-        // Directories in $PATH (split on ':')
-        if let Ok(path_var) = env::var("PATH") {
-            candidates.extend(path_var.split(':').map(PathBuf::from));
-        }
-
-        // ---------- search ----------
-        for dir in &candidates {
+        // Search through all paths
+        for dir in search_paths {
             for name in [&desktop_name, &exec_name] {
                 let full = dir.join(name);
-                // On Unix we treat both files that *exist* and files that are
-                // *executable* in $PATH the same; `exists()` is enough here.
                 if full.exists() {
                     return Some(full);
                 }
@@ -174,18 +175,12 @@ pub struct AppInfo {
     pub path: PathBuf,
 }
 
-pub fn find_available_apps() -> Vec<String> {
-    find_available_apps_with_paths()
-        .into_iter()
-        .map(|app| app.name)
-        .collect()
-}
 
 pub fn find_available_apps_with_paths() -> Vec<AppInfo> {
     let mut apps = Vec::new();
 
     if cfg!(target_os = "windows") {
-        let search_paths = get_windows_search_paths();
+        let search_paths = get_search_paths();
 
         for path in search_paths {
             if let Ok(entries) = std::fs::read_dir(&path) {
