@@ -65,7 +65,7 @@ pub fn load_config(path: &PathBuf) -> io::Result<Config> {
         error!("Failed to parse config file: {}", e);
         io::Error::new(io::ErrorKind::InvalidData, e)
     })?;
-    info!("Config loaded successfully");
+    //info!("Config loaded successfully");
     Ok(config)
 }
 

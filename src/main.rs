@@ -31,7 +31,16 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     #[clap(about = "Lists all available applications")]
-    List,
+    List {
+        #[clap(
+            long,
+            short = 'f',
+            help = "Output format: pretty (table), raw (one per line), or fzf (tab-separated)",
+            default_value = "pretty",
+            value_parser = ["pretty", "raw", "fzf"]
+        )]
+        format: String,
+    },
 
     #[clap(about = "Lists all applications in system startup folders")]
     StartupList,
@@ -93,7 +102,7 @@ fn main() -> io::Result<()> {
         Ok(())
     }
     SimpleLogger::new().init().unwrap();
-    info!("Starting application");
+    //info!("Starting application");
 
     let config_dir = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -111,11 +120,18 @@ fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Commands::List => {
-            println!("Available applications:");
-            for app in platform::find_available_apps() {
-                println!("  - {}", app);
-            }
+        Commands::List { format } => {
+            let apps = platform::find_available_apps_with_paths();
+            let format = match format.to_lowercase().as_str() {
+                "pretty" => platform::AppListFormat::Pretty,
+                "raw" => platform::AppListFormat::Raw,
+                "fzf" => platform::AppListFormat::Fzf,
+                _ => {
+                    println!("Invalid format. Using 'pretty' format.");
+                    platform::AppListFormat::Pretty
+                }
+            };
+            println!("{}", platform::format_app_list(&apps, format));
         }
         Commands::StartupList => {
             println!("System startup applications:");
@@ -142,7 +158,6 @@ fn main() -> io::Result<()> {
         Commands::CreateDesktop { env } => {
             create_desktop(&config, env)?;
         }
-        // In your main match statement:
         Commands::Completions { shell } => {
             let mut cmd = Cli::command();
             eprintln!("Generating completion file for {shell}...");
@@ -265,8 +280,9 @@ fn launch_apps(config: &Config, env: &str, force: bool) -> io::Result<()> {
             match platform::find_app_path(app) {
                 Some(app_path) => {
                     let mut command = if cfg!(target_os = "windows") {
+                        //TODO: change this to not start cmd but use windows run command via windows.rs
                         let mut cmd = ProcessCommand::new("cmd");
-                        cmd.args(["/C", "start", "", &app_path]);
+                        cmd.args(["/C", "start", "", &app_path.to_string_lossy()]);
                         cmd
                     } else {
                         let mut cmd = ProcessCommand::new("gtk-launch");

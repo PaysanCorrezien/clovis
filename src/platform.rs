@@ -2,6 +2,10 @@
 use std::io;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::{
+    env,
+    path::{PathBuf},
+};
 
 pub fn is_command_available(cmd: &str) -> bool {
     if cfg!(target_os = "windows") {
@@ -23,53 +27,123 @@ pub fn is_command_available(cmd: &str) -> bool {
     }
 }
 
-pub fn find_app_path(app: &str) -> Option<String> {
-    if cfg!(target_os = "windows") {
-        let app_name = if !app.ends_with(".lnk") {
-            format!("{}.lnk", app)
+#[cfg(target_os = "windows")]
+fn get_windows_search_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let user_profile = env::var("USERPROFILE").unwrap_or_default();
+    
+    // Static locations
+    let static_paths = vec![
+        PathBuf::from(r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs"),
+        PathBuf::from(r"C:\Users\Public\Desktop"),
+        PathBuf::from(format!(r"{user_profile}\Desktop")),
+        PathBuf::from(format!(r"{user_profile}\AppData\Roaming\Microsoft\Windows\Start Menu\Programs")),
+        PathBuf::from(format!(r"{user_profile}\Start Menu\Programs")),
+    ];
+    paths.extend(static_paths);
+
+    // Program Files locations
+    if let Ok(pf) = env::var("ProgramFiles") {
+        paths.push(PathBuf::from(pf));
+    }
+    if let Ok(pf86) = env::var("ProgramFiles(x86)") {
+        paths.push(PathBuf::from(pf86));
+    }
+
+    // WindowsApps container
+    if let Ok(pf) = env::var("ProgramFiles") {
+        let windows_apps = Path::new(&pf).join("WindowsApps");
+        if windows_apps.exists() {
+            paths.push(windows_apps);
+        }
+    }
+
+    // PATH environment variable
+    if let Ok(path_var) = env::var("PATH") {
+        paths.extend(path_var.split(';').map(PathBuf::from));
+    }
+
+    paths
+}
+
+/// Try to locate an application launcher (`.lnk` on Windows, `.desktop` on Unix)
+/// **or** an executable with the given base name that is directly on the file‑
+/// system or reachable through the system's *PATH*.
+///
+/// Returns the fully‑qualified path if it exists.
+pub fn find_app_path(app: &str) -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        // Normalize the requested name
+        let shortcut = if app.ends_with(".lnk") {
+            app.to_owned()
         } else {
-            app.to_string()
+            format!("{}.lnk", app)
+        };
+        let exe_name = if app.to_ascii_lowercase().ends_with(".exe") {
+            app.to_owned()
+        } else {
+            format!("{}.exe", app)
         };
 
-        let user_profile = std::env::var("USERPROFILE").unwrap_or_default();
-        let paths = vec![
-            "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs".to_string(),
-            "C:\\Users\\Public\\Desktop".to_string(),
-            format!("{}\\Desktop", user_profile),
-            format!(
-                "{}\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs",
-                user_profile
-            ),
-            format!("{}\\Start Menu\\Programs", user_profile),
-        ];
+        // Get all possible search paths
+        let search_paths = get_windows_search_paths();
 
-        for path in paths {
-            let full_path = format!("{}\\{}", path, app_name);
-            if std::path::Path::new(&full_path).exists() {
-                return Some(full_path);
+        // Search through all paths
+        for dir in search_paths {
+            // Try launcher first, then direct exe
+            for name in [&shortcut, &exe_name] {
+                let full = dir.join(name);
+                if full.exists() {
+                    return Some(full);
+                }
             }
         }
         None
-    } else {
-        let app_name = if !app.ends_with(".desktop") {
-            format!("{}.desktop", app)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        use std::ffi::OsStr;
+
+        let mut candidates = Vec::<PathBuf>::new();
+
+        // 1. "desktop-file" launcher (XDG)
+        let desktop_name = if app.ends_with(".desktop") {
+            app.to_owned()
         } else {
-            app.to_string()
+            format!("{}.desktop", app)
         };
 
-        let home_dir = std::env::var("HOME").unwrap_or_default();
-        let paths = [
-            "/usr/share/applications",
-            "/usr/local/share/applications",
-            &format!("{}/.local/share/applications", home_dir),
-            "/run/current-system/sw/share/applications",
-            &format!("{}/.nix-profile/share/applications", home_dir),
-        ];
+        // 2. raw executable name (as given)
+        let exec_name = app.to_owned();
 
-        for path in paths.iter() {
-            let full_path = format!("{}/{}", path, app_name);
-            if std::path::Path::new(&full_path).exists() {
-                return Some(full_path);
+        // ---------- build search directories ----------
+        let home_dir = env::var("HOME").unwrap_or_default();
+
+        // XDG-standard launcher locations
+        candidates.extend([
+            PathBuf::from("/usr/share/applications"),
+            PathBuf::from("/usr/local/share/applications"),
+            PathBuf::from(format!("{home_dir}/.local/share/applications")),
+            PathBuf::from("/run/current-system/sw/share/applications"),
+            PathBuf::from(format!("{home_dir}/.nix-profile/share/applications")),
+        ]);
+
+        // Directories in $PATH (split on ':')
+        if let Ok(path_var) = env::var("PATH") {
+            candidates.extend(path_var.split(':').map(PathBuf::from));
+        }
+
+        // ---------- search ----------
+        for dir in &candidates {
+            for name in [&desktop_name, &exec_name] {
+                let full = dir.join(name);
+                // On Unix we treat both files that *exist* and files that are
+                // *executable* in $PATH the same; `exists()` is enough here.
+                if full.exists() {
+                    return Some(full);
+                }
             }
         }
         None
@@ -88,28 +162,43 @@ pub fn is_desktop_file_available(app: &str) -> bool {
     find_app_path(app).is_some()
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum AppListFormat {
+    Pretty,
+    Raw,
+    Fzf,
+}
+
+pub struct AppInfo {
+    pub name: String,
+    pub path: PathBuf,
+}
+
 pub fn find_available_apps() -> Vec<String> {
+    find_available_apps_with_paths()
+        .into_iter()
+        .map(|app| app.name)
+        .collect()
+}
+
+pub fn find_available_apps_with_paths() -> Vec<AppInfo> {
     let mut apps = Vec::new();
 
     if cfg!(target_os = "windows") {
-        let user_profile = std::env::var("USERPROFILE").unwrap_or_default();
-        let paths = vec![
-            "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs".to_string(),
-            "C:\\Users\\Public\\Desktop".to_string(),
-            format!("{}\\Desktop", user_profile),
-            format!(
-                "{}\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs",
-                user_profile
-            ),
-            format!("{}\\Start Menu\\Programs", user_profile),
-        ];
+        let search_paths = get_windows_search_paths();
 
-        for path in paths.iter() {
-            if let Ok(entries) = std::fs::read_dir(path) {
+        for path in search_paths {
+            if let Ok(entries) = std::fs::read_dir(&path) {
                 for entry in entries.flatten() {
                     if let Some(file_name) = entry.file_name().to_str() {
-                        if file_name.ends_with(".lnk") {
-                            apps.push(strip_platform_extension(file_name).to_string());
+                        if file_name.ends_with(".lnk") || file_name.ends_with(".exe") {
+                            let full_path = path.join(file_name);
+                            if full_path.exists() {
+                                apps.push(AppInfo {
+                                    name: strip_platform_extension(file_name).to_string(),
+                                    path: full_path,
+                                });
+                            }
                         }
                     }
                 }
@@ -125,12 +214,19 @@ pub fn find_available_apps() -> Vec<String> {
             &format!("{}/.nix-profile/share/applications", home_dir),
         ];
 
-        for path in paths.iter() {
-            if let Ok(entries) = std::fs::read_dir(path) {
+        for path_str in paths.iter() {
+            let path = PathBuf::from(path_str);
+            if let Ok(entries) = std::fs::read_dir(&path) {
                 for entry in entries.flatten() {
                     if let Some(file_name) = entry.file_name().to_str() {
                         if file_name.ends_with(".desktop") {
-                            apps.push(strip_platform_extension(file_name).to_string());
+                            let full_path = path.join(file_name);
+                            if full_path.exists() {
+                                apps.push(AppInfo {
+                                    name: strip_platform_extension(file_name).to_string(),
+                                    path: full_path,
+                                });
+                            }
                         }
                     }
                 }
@@ -138,9 +234,35 @@ pub fn find_available_apps() -> Vec<String> {
         }
     }
 
-    apps.sort();
-    apps.dedup();
+    apps.sort_by(|a, b| a.name.cmp(&b.name));
+    apps.dedup_by(|a, b| a.name == b.name);
     apps
+}
+
+pub fn format_app_list(apps: &[AppInfo], format: AppListFormat) -> String {
+    match format {
+        AppListFormat::Pretty => {
+            let mut output = String::new();
+            output.push_str("Name\tPath\n");
+            output.push_str("----\t----\n");
+            for app in apps {
+                output.push_str(&format!("{}\t{}\n", app.name, app.path.display()));
+            }
+            output
+        }
+        AppListFormat::Raw => {
+            apps.iter()
+                .map(|app| format!("{}", app.name))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        AppListFormat::Fzf => {
+            apps.iter()
+                .map(|app| format!("{}\t{}", app.name, app.path.display()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+    }
 }
 
 // TODO: Implement more than this for win ( the one that are on taskbar -> startup)

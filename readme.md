@@ -13,6 +13,7 @@ Clovis is a powerful application environment manager that helps you organize and
 - **Desktop Integration**: Create desktop shortcuts for quick environment launches
 - **Shell Completions**: Built-in support for shell completion
 - **Configuration Validation**: Verify all configured applications are properly installed
+- **Flexible Application Listing**: Multiple output formats for different use cases
 
 ## 🛠️ Installation
 
@@ -50,8 +51,11 @@ clovis generate
 # Show current configuration
 clovis show
 
-# List available applications
-clovis list
+# List available applications in different formats
+clovis list                    # Pretty table format (default)
+clovis list -f raw            # One entry per line
+clovis list -f fzf            # Tab-separated format for fzf
+clovis list -f fzf | fzf      # Interactive selection with fzf
 
 # Launch an environment
 clovis launch work
@@ -83,21 +87,23 @@ environments:
 Usage: clovis.exe <COMMAND>
 
 Commands:
-list Lists all available applications
-startup-list Lists all applications in system startup folders
-show Shows the current configuration
-launch Launches all apps in the specified environment
-validate Validates the configuration to ensure all apps are installed
-edit Edits the configuration for a specific environment
-config Opens the configuration file in the default editor
-generate Generates a base example configuration
-create-desktop Creates a desktop entry for the specified environment
-completions Generates shell completions
-help Print this message or the help of the given subcommand(s)
+  list          Lists all available applications
+    Options:
+      -f, --format <FORMAT>  Output format: pretty (table), raw (one per line), or fzf (tab-separated) [default: pretty]
+  startup-list  Lists all applications in system startup folders
+  show          Shows the current configuration
+  launch        Launches all apps in the specified environment
+  validate      Validates the configuration to ensure all apps are installed
+  edit          Edits the configuration for a specific environment
+  config        Opens the configuration file in the default editor
+  generate      Generates a base example configuration
+  create-desktop Creates a desktop entry for the specified environment
+  completions   Generates shell completions
+  help          Print this message or the help of the given subcommand(s)
 
 Options:
--h, --help Print help
--V, --version Print version
+  -h, --help     Print help
+  -V, --version  Print version
 ```
 
 ### Shell Completion
