@@ -44,9 +44,9 @@ jobs:
       - name: Package
         shell: bash
         run: |
+          mkdir -p dist
           ZIP="clovis-${{ github.ref_name }}-${{ matrix.target }}.zip"
           BIN="target/${{ matrix.target }}/release/clovis"
-          mkdir -p dist
           cp "$BIN" "dist/clovis"
           zip -j "dist/$ZIP" "dist/clovis"
 
@@ -77,9 +77,15 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
+          # Create staging and output dirs
+          New-Item -ItemType Directory -Path pkg
+          New-Item -ItemType Directory -Path dist
+
+          # Copy binary
+          Copy-Item "target\${{ matrix.target }}\release\clovis.exe" pkg\clovis.exe
+
+          # Create the zip into dist/
           $ZIP = "clovis-${{ github.ref_name }}-${{ matrix.target }}.zip"
-          mkdir pkg
-          Copy-Item "target\${{ matrix.target }}\release\clovis.exe" pkg\
           Compress-Archive -Path pkg\clovis.exe -DestinationPath "dist\$ZIP"
 
       - name: Upload artifact
@@ -104,7 +110,6 @@ jobs:
       - name: Download all artifacts into dist/
         uses: actions/download-artifact@v4
         with:
-          # pull every zip into dist/
           path: dist
 
       - name: Create GitHub Release
