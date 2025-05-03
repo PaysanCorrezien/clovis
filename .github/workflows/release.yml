@@ -1,0 +1,87 @@
+# .github/workflows/release.yml
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  build:
+    name: Build for ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Build release binary
+        run: |
+          cargo build --release
+
+      - name: Package artifact
+        run: |
+          mkdir dist
+          if [ "${{ matrix.os }}" == "windows-latest" ]; then
+            copy target\release\clovis.exe dist\clovis.exe
+            powershell Compress-Archive -Path dist\clovis.exe -DestinationPath clovis-windows.zip
+          else
+            cp target/release/clovis dist/clovis
+            zip clovis-linux.zip dist/clovis
+          fi
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ matrix.os == 'windows-latest' && 'windows' || 'linux' }}
+          path: ${{ matrix.os == 'windows-latest' && 'clovis-windows.zip' || 'clovis-linux.zip' }}
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Linux ZIP
+        if: needs.build.outputs.artifact == 'linux'
+        uses: actions/download-artifact@v3
+        with:
+          name: linux
+
+      - name: Download Windows ZIP
+        if: needs.build.outputs.artifact == 'windows'
+        uses: actions/download-artifact@v3
+        with:
+          name: windows
+
+      - name: Create GitHub Release
+        id: ghrel
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          body: |
+            - clovis ${github.ref_name} (Linux)
+            - clovis ${github.ref_name} (Windows)
+
+      - name: Upload Linux asset
+        uses: softprops/action-gh-release@v1
+        with:
+          upload_url: ${{ steps.ghrel.outputs.upload_url }}
+          asset_path: clovis-linux.zip
+          asset_name: clovis-linux.zip
+          asset_content_type: application/zip
+
+      - name: Upload Windows asset
+        uses: softprops/action-gh-release@v1
+        with:
+          upload_url: ${{ steps.ghrel.outputs.upload_url }}
+          asset_path: clovis-windows.zip
+          asset_name: clovis-windows.zip
+          asset_content_type: application/zip
