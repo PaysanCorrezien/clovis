@@ -392,10 +392,13 @@ fn launch_apps(config: &Config, env: &str, force: bool) -> io::Result<()> {
                         cmd.args(["/C", "start", "", &app_path.to_string_lossy()]);
                         cmd
                     } else {
-                        let mut cmd = ProcessCommand::new("gtk-launch");
-                        cmd.arg(&app_path);
-                        cmd.env("DISPLAY", ":0");
-                        cmd
+                        if app_path.extension().and_then(|s| s.to_str()) == Some("desktop") {
+                            let mut cmd = ProcessCommand::new("gio");
+                            cmd.args(["launch", app_path.to_string_lossy().as_ref()]);
+                            cmd
+                        } else {
+                            ProcessCommand::new(&app_path)
+                        }
                     };
 
                     command.stdout(Stdio::null());

@@ -417,46 +417,25 @@ $Shortcut.Save()
     Ok(())
 }
 
-fn get_linux_desktop_dir() -> io::Result<PathBuf> {
-    // Try XDG_DESKTOP_DIR environment variable first
-    if let Ok(desktop_dir) = std::env::var("XDG_DESKTOP_DIR") {
-        let path = PathBuf::from(desktop_dir);
-        if path.exists() {
-            return Ok(path);
-        }
-    }
+fn get_linux_applications_dir() -> io::Result<PathBuf> {
+    let path = if let Ok(xdg_data_home) = std::env::var("XDG_DATA_HOME") {
+        PathBuf::from(xdg_data_home).join("applications")
+    } else {
+        let home = std::env::var("HOME").map_err(|_| {
+            io::Error::new(io::ErrorKind::NotFound, "HOME environment variable not set")
+        })?;
+        PathBuf::from(home).join(".local/share/applications")
+    };
 
-    // Try xdg-user-dir command
-    if let Ok(output) = Command::new("xdg-user-dir").arg("DESKTOP").output() {
-        if output.status.success() {
-            if let Ok(desktop_path) = String::from_utf8(output.stdout) {
-                let path = PathBuf::from(desktop_path.trim());
-                if path.exists() {
-                    return Ok(path);
-                }
-            }
-        }
-    }
-
-    // Fall back to ~/Desktop
-    let home = std::env::var("HOME").map_err(|_| {
-        io::Error::new(io::ErrorKind::NotFound, "HOME environment variable not set")
-    })?;
-    let desktop_dir = PathBuf::from(home).join("Desktop");
-
-    if !desktop_dir.exists() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Desktop directory not found. Expected at: {}", desktop_dir.display()),
-        ));
-    }
-
-    Ok(desktop_dir)
+    std::fs::create_dir_all(&path)?;
+    Ok(path)
 }
 
 fn create_linux_desktop_entry(env: &str, icon: Option<&str>) -> std::io::Result<()> {
-    let desktop_dir = get_linux_desktop_dir()?;
-    let desktop_path = desktop_dir.join(format!("clovis-{}.desktop", env));
+    let applications_dir = get_linux_applications_dir()?;
+    let desktop_path = applications_dir.join(format!("clovis-{}.desktop", env));
+    let current_exe = std::env::current_exe()?;
+    let exec_path = current_exe.to_string_lossy().replace(' ', "\\ ");
 
     let icon_path = if let Some(icon_input) = icon {
         let resolver = IconResolver::new()?;
@@ -476,12 +455,12 @@ fn create_linux_desktop_entry(env: &str, icon: Option<&str>) -> std::io::Result<
         r#"[Desktop Entry]
 Version=1.0
 Name=Clovis {}
-Exec=clovis launch {}
+Exec={} launch {}
 Icon={}
 Type=Application
 Terminal=false
 "#,
-        env, env, icon_path
+        env, exec_path, env, icon_path
     );
 
     std::fs::write(&desktop_path, desktop_entry)?;
