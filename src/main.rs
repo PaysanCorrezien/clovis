@@ -4,7 +4,7 @@ use clap::{value_parser, Command, CommandFactory};
 use clap_complete::{generate, Generator, Shell};
 use std::collections::HashMap;
 
-use std::io::{self};
+use std::io::{self, BufRead};
 use std::path::PathBuf;
 use std::process::{Command as ProcessCommand, Stdio};
 
@@ -13,15 +13,16 @@ use log::{error, info};
 use simple_logger::SimpleLogger;
 
 mod config;
+mod icons;
 mod platform;
 
 use config::{generate_config, load_config, save_config, show_config, validate_config, Config};
 
 #[derive(Parser)]
 #[clap(
-    name = "Clovis App Launcher",
+    name = "clovis",
     version = "0.1",
-    about = "Launches applications based on environment configurations"
+    about = "Clovis App Launcher - Launches applications based on environment configurations"
 )]
 struct Cli {
     #[clap(subcommand)]
@@ -41,6 +42,15 @@ enum Commands {
         )]
         format: String,
     },
+
+    #[clap(about = "Search for applications by name")]
+    Search {
+        #[clap(help = "The search query (partial match)")]
+        query: String,
+    },
+
+    #[clap(about = "Capture currently running applications")]
+    Snapshot,
 
     #[clap(about = "Lists all applications in system startup folders")]
     StartupList,
@@ -66,10 +76,10 @@ enum Commands {
     Edit {
         #[clap(help = "The name of the environment to edit")]
         env: String,
-        #[clap(help = "Action to perform: add or remove")]
+        #[clap(help = "Action to perform: add, remove, or set (set reads from stdin)")]
         action: String,
-        #[clap(help = "The name of the application to add or remove")]
-        app: String,
+        #[clap(help = "The name of the application to add or remove (not used with 'set')")]
+        app: Option<String>,
     },
 
     #[clap(about = "Opens the configuration file in the default editor")]
@@ -82,6 +92,12 @@ enum Commands {
     CreateDesktop {
         #[clap(help = "The name of the environment to create a desktop entry for")]
         env: String,
+        #[clap(
+            long,
+            short = 'i',
+            help = "Icon path or service name (e.g., 'firefox', './icon.png')"
+        )]
+        icon: Option<String>,
     },
     #[clap(about = "Generates shell completions")]
     Completions {
@@ -91,16 +107,27 @@ enum Commands {
 }
 
 fn main() -> io::Result<()> {
-    fn create_desktop(config: &Config, env: &str) -> io::Result<()> {
+    fn create_desktop(config: &Config, env: &str, icon: Option<&str>) -> io::Result<()> {
         if !config.environments.contains_key(env) {
             println!("Environment '{}' not found.", env);
             return Ok(());
         }
 
-        platform::create_desktop_entry(env)?;
+        platform::create_desktop_entry(env, icon)?;
         println!("Desktop entry created for environment '{}'.", env);
         Ok(())
     }
+
+    let cli = Cli::parse();
+
+    // Handle completions command early, before any logging or config loading
+    if let Commands::Completions { shell } = &cli.command {
+        let mut cmd = Cli::command();
+        eprintln!("Generating completion file for {shell}...");
+        print_completions(*shell, &mut cmd);
+        return Ok(());
+    }
+
     SimpleLogger::new().init().unwrap();
     //info!("Starting application");
 
@@ -117,8 +144,6 @@ fn main() -> io::Result<()> {
         }
     });
 
-    let cli = Cli::parse();
-
     match &cli.command {
         Commands::List { format } => {
             let apps = platform::find_available_apps_with_paths();
@@ -132,6 +157,12 @@ fn main() -> io::Result<()> {
                 }
             };
             println!("{}", platform::format_app_list(&apps, format));
+        }
+        Commands::Search { query } => {
+            handle_search_command(query);
+        }
+        Commands::Snapshot => {
+            handle_snapshot_command();
         }
         Commands::StartupList => {
             println!("System startup applications:");
@@ -155,76 +186,152 @@ fn main() -> io::Result<()> {
         Commands::Generate => {
             generate_config(&config_path)?;
         }
-        Commands::CreateDesktop { env } => {
-            create_desktop(&config, env)?;
+        Commands::CreateDesktop { env, icon } => {
+            create_desktop(&config, env, icon.as_deref())?;
         }
-        Commands::Completions { shell } => {
-            let mut cmd = Cli::command();
-            eprintln!("Generating completion file for {shell}...");
-            print_completions(*shell, &mut cmd);
+        Commands::Completions { .. } => {
+            // Handled early in main, before logger initialization
+            unreachable!()
         }
     }
 
     Ok(())
 }
 
+fn handle_search_command(query: &str) {
+    let apps = platform::find_available_apps_with_paths();
+    let query_lower = query.to_lowercase();
+
+    let matches: Vec<_> = apps
+        .iter()
+        .filter(|app| app.name.to_lowercase().contains(&query_lower))
+        .collect();
+
+    if matches.is_empty() {
+        println!("No applications found matching '{}'", query);
+        return;
+    }
+
+    println!("Found {} application(s) matching '{}':\n", matches.len(), query);
+
+    for app in matches {
+        println!("Name: {}", app.name);
+        println!("Path: {}", app.path.display());
+
+        // Try to extract additional info from .desktop files on Linux
+        if !cfg!(target_os = "windows") && app.path.extension().and_then(|s| s.to_str()) == Some("desktop") {
+            if let Ok(content) = std::fs::read_to_string(&app.path) {
+                for line in content.lines() {
+                    if let Some(display_name) = line.strip_prefix("Name=") {
+                        println!("Display Name: {}", display_name);
+                    } else if let Some(comment) = line.strip_prefix("Comment=") {
+                        println!("Description: {}", comment);
+                    } else if let Some(exec) = line.strip_prefix("Exec=") {
+                        println!("Executable: {}", exec);
+                    }
+                }
+            }
+        }
+
+        println!();
+    }
+}
+
+fn handle_snapshot_command() {
+    let running_apps = platform::get_running_apps();
+
+    for app in running_apps {
+        println!("{}", app);
+    }
+}
+
 fn handle_edit_command(
     config: &mut Config,
     env: &str,
     action: &str,
-    app: &str,
+    app: &Option<String>,
 ) -> io::Result<bool> {
     if !config.environments.contains_key(env) {
         error!("Environment '{}' does not exist.", env);
         return Ok(false);
     }
 
-    let app_available =
-        platform::is_desktop_file_available(app) || platform::is_command_available(app);
-
-    if !app_available {
-        println!(
-            "Warning: Application '{}' is not installed or not in PATH.",
-            app
-        );
-    }
-
     match action {
-        "add" => {
-            let apps = config
-                .environments
-                .entry(env.to_string())
-                .or_insert_with(Vec::new);
-            let normalized_app = platform::strip_platform_extension(app);
-            if apps
-                .iter()
-                .any(|a| platform::strip_platform_extension(a) == normalized_app)
-            {
-                error!(
-                    "Application '{}' is already in environment '{}'",
-                    normalized_app, env
-                );
-                return Ok(false);
+        "set" => {
+            // Read apps from stdin
+            let stdin = io::stdin();
+            let reader = io::BufReader::new(stdin);
+            let mut new_apps = Vec::new();
+
+            for line in reader.lines() {
+                let line = line?;
+                let app_name = line.trim();
+                if !app_name.is_empty() {
+                    let normalized_app = platform::strip_platform_extension(app_name);
+                    new_apps.push(normalized_app.to_string());
+                }
             }
-            apps.push(normalized_app.to_string());
-            println!("Added '{}' to environment '{}'", app, env);
-            info!("Added '{}' to environment '{}'", app, env);
+
+            // Replace the entire app list
+            config.environments.insert(env.to_string(), new_apps.clone());
+            println!("Set environment '{}' with {} applications", env, new_apps.len());
+            info!("Set environment '{}' with {} applications", env, new_apps.len());
         }
-        "remove" => {
-            if let Some(apps) = config.environments.get_mut(env) {
-                if let Some(pos) = apps.iter().position(|x| x == app) {
-                    apps.remove(pos);
-                    println!("Removed '{}' from environment '{}'", app, env);
-                    info!("Removed '{}' from environment '{}'", app, env);
-                } else {
-                    println!("App '{}' not found in environment '{}'", app, env);
+        "add" | "remove" => {
+            let app = match app {
+                Some(a) => a,
+                None => {
+                    error!("App name required for '{}' action", action);
                     return Ok(false);
+                }
+            };
+
+            let app_available =
+                platform::is_desktop_file_available(app) || platform::is_command_available(app);
+
+            if !app_available {
+                println!(
+                    "Warning: Application '{}' is not installed or not in PATH.",
+                    app
+                );
+            }
+
+            if action == "add" {
+                let apps = config
+                    .environments
+                    .entry(env.to_string())
+                    .or_insert_with(Vec::new);
+                let normalized_app = platform::strip_platform_extension(app);
+                if apps
+                    .iter()
+                    .any(|a| platform::strip_platform_extension(a) == normalized_app)
+                {
+                    error!(
+                        "Application '{}' is already in environment '{}'",
+                        normalized_app, env
+                    );
+                    return Ok(false);
+                }
+                apps.push(normalized_app.to_string());
+                println!("Added '{}' to environment '{}'", app, env);
+                info!("Added '{}' to environment '{}'", app, env);
+            } else {
+                // remove
+                if let Some(apps) = config.environments.get_mut(env) {
+                    if let Some(pos) = apps.iter().position(|x| x == app) {
+                        apps.remove(pos);
+                        println!("Removed '{}' from environment '{}'", app, env);
+                        info!("Removed '{}' from environment '{}'", app, env);
+                    } else {
+                        println!("App '{}' not found in environment '{}'", app, env);
+                        return Ok(false);
+                    }
                 }
             }
         }
         _ => {
-            println!("Invalid action '{}'. Use 'add' or 'remove'.", action);
-            error!("Invalid action '{}'. Use 'add' or 'remove'.", action);
+            println!("Invalid action '{}'. Use 'add', 'remove', or 'set'.", action);
+            error!("Invalid action '{}'. Use 'add', 'remove', or 'set'.", action);
             return Ok(false);
         }
     }
@@ -285,10 +392,13 @@ fn launch_apps(config: &Config, env: &str, force: bool) -> io::Result<()> {
                         cmd.args(["/C", "start", "", &app_path.to_string_lossy()]);
                         cmd
                     } else {
-                        let mut cmd = ProcessCommand::new("gtk-launch");
-                        cmd.arg(&app_path);
-                        cmd.env("DISPLAY", ":0");
-                        cmd
+                        if app_path.extension().and_then(|s| s.to_str()) == Some("desktop") {
+                            let mut cmd = ProcessCommand::new("gio");
+                            cmd.args(["launch", app_path.to_string_lossy().as_ref()]);
+                            cmd
+                        } else {
+                            ProcessCommand::new(&app_path)
+                        }
                     };
 
                     command.stdout(Stdio::null());
