@@ -1,23 +1,21 @@
 // src/config.rs
 
+use log::{error, info};
+use serde::{Deserialize, Serialize};
+use serde_yaml;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
-use log::{error, info};
-use serde::{Deserialize, Serialize};
-use serde_yaml;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Config {
     pub environments: HashMap<String, Vec<String>>,
 }
 
 impl Config {
-
     #[allow(dead_code)]
     pub fn new() -> Self {
-
         Config {
             environments: HashMap::new(),
         }
@@ -26,7 +24,10 @@ impl Config {
 
 pub fn generate_config(config_path: &PathBuf) -> io::Result<()> {
     if config_path.exists() {
-        println!("Configuration file already exists at: {}", config_path.display());
+        println!(
+            "Configuration file already exists at: {}",
+            config_path.display()
+        );
         println!("Use 'clovis config' to edit the existing configuration.");
         return Ok(());
     }
@@ -56,7 +57,10 @@ pub fn generate_config(config_path: &PathBuf) -> io::Result<()> {
     };
 
     save_config(config_path, &example_config)?;
-    println!("Example configuration generated successfully at: {}", config_path.display());
+    println!(
+        "Example configuration generated successfully at: {}",
+        config_path.display()
+    );
     Ok(())
 }
 

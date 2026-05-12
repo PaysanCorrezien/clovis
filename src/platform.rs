@@ -3,10 +3,7 @@ use crate::icons::{IconFormat, IconResolver};
 use log::warn;
 use std::io;
 use std::process::{Command, Stdio};
-use std::{
-    env,
-    path::PathBuf,
-};
+use std::{env, path::PathBuf};
 
 pub fn is_command_available(cmd: &str) -> bool {
     if cfg!(target_os = "windows") {
@@ -32,13 +29,15 @@ pub fn is_command_available(cmd: &str) -> bool {
 fn get_search_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let user_profile = env::var("USERPROFILE").unwrap_or_default();
-    
+
     // Static locations
     let static_paths = vec![
         PathBuf::from(r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs"),
         PathBuf::from(r"C:\Users\Public\Desktop"),
         PathBuf::from(format!(r"{user_profile}\Desktop")),
-        PathBuf::from(format!(r"{user_profile}\AppData\Roaming\Microsoft\Windows\Start Menu\Programs")),
+        PathBuf::from(format!(
+            r"{user_profile}\AppData\Roaming\Microsoft\Windows\Start Menu\Programs"
+        )),
         PathBuf::from(format!(r"{user_profile}\Start Menu\Programs")),
     ];
     paths.extend(static_paths);
@@ -113,7 +112,9 @@ fn get_application_paths() -> Vec<PathBuf> {
     if let Ok(xdg_data_home) = env::var("XDG_DATA_HOME") {
         paths.push(PathBuf::from(xdg_data_home).join("applications"));
     } else {
-        paths.push(PathBuf::from(format!("{home_dir}/.local/share/applications")));
+        paths.push(PathBuf::from(format!(
+            "{home_dir}/.local/share/applications"
+        )));
     }
 
     // Autostart directories
@@ -125,7 +126,9 @@ fn get_application_paths() -> Vec<PathBuf> {
     // Flatpak locations
     paths.extend([
         PathBuf::from("/var/lib/flatpak/exports/share/applications"),
-        PathBuf::from(format!("{home_dir}/.local/share/flatpak/exports/share/applications")),
+        PathBuf::from(format!(
+            "{home_dir}/.local/share/flatpak/exports/share/applications"
+        )),
     ]);
 
     // Snap locations
@@ -265,58 +268,15 @@ pub struct AppInfo {
     pub path: PathBuf,
 }
 
-
 pub fn find_available_apps_with_paths() -> Vec<AppInfo> {
-    let mut apps = Vec::new();
-
-    if cfg!(target_os = "windows") {
-        let search_paths = get_search_paths();
-
-        for path in search_paths {
-            if let Ok(entries) = std::fs::read_dir(&path) {
-                for entry in entries.flatten() {
-                    if let Some(file_name) = entry.file_name().to_str() {
-                        if file_name.ends_with(".lnk") || file_name.ends_with(".exe") {
-                            let full_path = path.join(file_name);
-                            if full_path.exists() {
-                                apps.push(AppInfo {
-                                    name: strip_platform_extension(file_name).to_string(),
-                                    path: full_path,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        let paths = get_application_paths();
-
-        for path in paths {
-            if let Ok(entries) = std::fs::read_dir(&path) {
-                for entry in entries.flatten() {
-                    if let Some(file_name) = entry.file_name().to_str() {
-                        if file_name.ends_with(".desktop") {
-                            let full_path = path.join(file_name);
-                            if full_path.exists() {
-                                apps.push(AppInfo {
-                                    name: strip_platform_extension(file_name).to_string(),
-                                    path: full_path,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Also scan /opt for apps
-        apps.extend(scan_opt_directory());
-    }
-
-    apps.sort_by(|a, b| a.name.cmp(&b.name));
-    apps.dedup_by(|a, b| a.name == b.name);
-    apps
+    crate::discovery::discover_installed_apps(true)
+        .apps
+        .into_iter()
+        .map(|app| AppInfo {
+            name: app.name,
+            path: app.path,
+        })
+        .collect()
 }
 
 pub fn format_app_list(apps: &[AppInfo], format: AppListFormat) -> String {
@@ -330,18 +290,16 @@ pub fn format_app_list(apps: &[AppInfo], format: AppListFormat) -> String {
             }
             output
         }
-        AppListFormat::Raw => {
-            apps.iter()
-                .map(|app| format!("{}", app.name))
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
-        AppListFormat::Fzf => {
-            apps.iter()
-                .map(|app| format!("{}\t{}", app.name, app.path.display()))
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
+        AppListFormat::Raw => apps
+            .iter()
+            .map(|app| format!("{}", app.name))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        AppListFormat::Fzf => apps
+            .iter()
+            .map(|app| format!("{}\t{}", app.name, app.path.display()))
+            .collect::<Vec<_>>()
+            .join("\n"),
     }
 }
 
@@ -357,7 +315,12 @@ pub fn create_desktop_entry(env: &str, icon: Option<&str>) -> std::io::Result<()
 fn get_default_icon_path() -> String {
     std::env::current_dir()
         .ok()
-        .and_then(|p| p.join(".assets").join("icon.ico").to_str().map(String::from))
+        .and_then(|p| {
+            p.join(".assets")
+                .join("icon.ico")
+                .to_str()
+                .map(String::from)
+        })
         .unwrap_or_else(|| String::from(""))
 }
 
@@ -377,7 +340,10 @@ fn create_windows_desktop_entry(env: &str, icon: Option<&str>) -> std::io::Resul
         match resolver.get_icon_path(source, IconFormat::Ico) {
             Ok(path) => path.to_string_lossy().to_string(),
             Err(e) => {
-                warn!("Failed to resolve icon '{}': {}. Using default.", icon_input, e);
+                warn!(
+                    "Failed to resolve icon '{}': {}. Using default.",
+                    icon_input, e
+                );
                 get_default_icon_path()
             }
         }
@@ -443,7 +409,10 @@ fn create_linux_desktop_entry(env: &str, icon: Option<&str>) -> std::io::Result<
         match resolver.get_icon_path(source, IconFormat::Png) {
             Ok(path) => path.to_string_lossy().to_string(),
             Err(e) => {
-                warn!("Failed to resolve icon '{}': {}. Using default.", icon_input, e);
+                warn!(
+                    "Failed to resolve icon '{}': {}. Using default.",
+                    icon_input, e
+                );
                 get_default_icon_path()
             }
         }
@@ -705,9 +674,7 @@ fn extract_executable_from_desktop(desktop_path: &PathBuf) -> Option<DesktopExec
             // Remove quotes if present
             let exec = exec.trim_matches('"').trim_matches('\'');
             // Remove any path components to get just the executable name
-            let exec_name = std::path::Path::new(exec)
-                .file_name()?
-                .to_str()?;
+            let exec_name = std::path::Path::new(exec).file_name()?.to_str()?;
 
             // Webapps (--class= or --app=) are not reliably detectable on Wayland
             // so we skip them entirely for snapshot purposes
@@ -743,7 +710,9 @@ fn is_system_service(app_name: &str) -> bool {
     ];
 
     let lower_name = app_name.to_lowercase();
-    system_services.iter().any(|service| lower_name.contains(&service.to_lowercase()))
+    system_services
+        .iter()
+        .any(|service| lower_name.contains(&service.to_lowercase()))
 }
 
 pub fn get_running_apps() -> Vec<String> {
@@ -791,11 +760,12 @@ pub fn get_running_apps() -> Vec<String> {
                 }
             }
 
-            let is_running = window_titles.iter().any(|title| {
-                title.contains(&app_name) || app_name.contains(title)
-            }) || process_names.iter().any(|proc| {
-                proc.contains(&app_name) || app_name.contains(proc)
-            });
+            let is_running = window_titles
+                .iter()
+                .any(|title| title.contains(&app_name) || app_name.contains(title))
+                || process_names
+                    .iter()
+                    .any(|proc| proc.contains(&app_name) || app_name.contains(proc));
 
             if is_running {
                 let exec_key = if let Some(ref exec) = exec_info {
@@ -856,14 +826,18 @@ pub fn get_running_apps() -> Vec<String> {
 
                 // Match against executable from .desktop file
                 if let Some(ref exec) = exec_info {
-
                     // Regular app: match on executable name
                     let exec_lower = exec.executable.to_lowercase();
                     let full_exec_path = exec.full_command.split_whitespace().next().unwrap_or("");
-                    let full_exec_path_lower = full_exec_path.trim_matches('"').trim_matches('\'').to_lowercase();
+                    let full_exec_path_lower = full_exec_path
+                        .trim_matches('"')
+                        .trim_matches('\'')
+                        .to_lowercase();
 
                     // Check if executable name matches process name exactly
-                    if process_name == exec_lower || process_name.ends_with(&format!("/{}", exec_lower)) {
+                    if process_name == exec_lower
+                        || process_name.ends_with(&format!("/{}", exec_lower))
+                    {
                         is_running = true;
                         break;
                     }
@@ -879,12 +853,16 @@ pub fn get_running_apps() -> Vec<String> {
 
                         // For wrapped apps (like Electron), check if the parent directory appears
                         // Only do this for app-specific directories (not common system dirs like /usr/bin)
-                        if let Some(parent_dir) = std::path::Path::new(&full_exec_path_lower).parent() {
+                        if let Some(parent_dir) =
+                            std::path::Path::new(&full_exec_path_lower).parent()
+                        {
                             let parent_str = parent_dir.to_string_lossy().to_lowercase();
                             // Only match specific app directories (not /usr/bin, /usr/local/bin, etc.)
                             let is_app_specific_dir = parent_str.starts_with("/opt/")
-                                || parent_str.starts_with("/usr/share/") && parent_str.split('/').count() > 3
-                                || parent_str.starts_with("/usr/local/share/") && parent_str.split('/').count() > 4;
+                                || parent_str.starts_with("/usr/share/")
+                                    && parent_str.split('/').count() > 3
+                                || parent_str.starts_with("/usr/local/share/")
+                                    && parent_str.split('/').count() > 4;
 
                             if is_app_specific_dir && proc.contains(&parent_str) {
                                 is_running = true;

@@ -1,36 +1,47 @@
-// At the top of your file with other imports:
-// At the top with other imports
-use clap::{value_parser, Command, CommandFactory};
+use clap::{value_parser, Command, CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Generator, Shell};
-use std::collections::HashMap;
-
-use std::io::{self, BufRead};
-use std::path::PathBuf;
-use std::process::{Command as ProcessCommand, Stdio};
-
-use clap::{Parser, Subcommand};
+use clovis::benchmark::{
+    benchmark_discovery, benchmark_profile_launch, format_discovery_benchmark,
+    format_profile_launch_benchmark,
+};
+use clovis::config::{
+    generate_config, load_config, save_config, show_config, validate_config, Config,
+};
+use clovis::discovery::discover_installed_apps;
+use clovis::launch::{launch_profile, LaunchOptions};
+use clovis::profile;
+use clovis::{gui, platform};
 use log::{error, info};
 use simple_logger::SimpleLogger;
-
-mod config;
-mod icons;
-mod platform;
-
-use config::{generate_config, load_config, save_config, show_config, validate_config, Config};
+use std::collections::HashMap;
+use std::io::{self, BufRead};
+use std::path::PathBuf;
+use std::process::Command as ProcessCommand;
 
 #[derive(Parser)]
 #[clap(
     name = "clovis",
     version = "0.1",
-    about = "Clovis App Launcher - Launches applications based on environment configurations"
+    about = "Clovis App Launcher - profile-based app launching from CLI or GUI"
 )]
 struct Cli {
+    #[clap(
+        long,
+        global = true,
+        value_name = "PATH",
+        help = "Use an explicit config YAML path instead of the default user config"
+    )]
+    config_path: Option<PathBuf>,
+
     #[clap(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
+    #[clap(about = "Opens the iced GUI profile launcher")]
+    Gui,
+
     #[clap(about = "Lists all available applications")]
     List {
         #[clap(
@@ -41,6 +52,21 @@ enum Commands {
             value_parser = ["pretty", "raw", "fzf"]
         )]
         format: String,
+        #[clap(long, help = "Refresh the native installed-app cache before listing")]
+        refresh: bool,
+    },
+
+    #[clap(about = "Lists installed applications using the native discovery engine")]
+    ListInstalledApps {
+        #[clap(
+            long,
+            short = 'f',
+            default_value = "pretty",
+            value_parser = ["pretty", "raw", "fzf"]
+        )]
+        format: String,
+        #[clap(long, help = "Refresh the native installed-app cache before listing")]
+        refresh: bool,
     },
 
     #[clap(about = "Search for applications by name")]
@@ -55,12 +81,27 @@ enum Commands {
     #[clap(about = "Lists all applications in system startup folders")]
     StartupList,
 
-    #[clap(about = "Shows the current configuration")]
-    Show,
+    #[clap(about = "Shows the current configuration or one profile")]
+    Show {
+        #[clap(help = "Optional profile name to inspect")]
+        profile: Option<String>,
+    },
 
-    #[clap(about = "Launches all apps in the specified environment")]
+    #[clap(about = "Inspects one profile")]
+    Inspect {
+        #[clap(help = "The profile name")]
+        profile: String,
+    },
+
+    #[clap(about = "Profile automation commands")]
+    Profiles {
+        #[clap(subcommand)]
+        command: ProfileCommands,
+    },
+
+    #[clap(about = "Launches all apps in the specified profile/environment")]
     Launch {
-        #[clap(help = "The name of the environment to launch")]
+        #[clap(help = "The name of the profile/environment to launch")]
         env: Option<String>,
         #[clap(
             long,
@@ -99,6 +140,13 @@ enum Commands {
         )]
         icon: Option<String>,
     },
+
+    #[clap(about = "Repeatable benchmark commands")]
+    Benchmark {
+        #[clap(subcommand)]
+        command: BenchmarkCommands,
+    },
+
     #[clap(about = "Generates shell completions")]
     Completions {
         #[clap(long = "generate", value_parser = value_parser!(Shell))]
@@ -106,36 +154,50 @@ enum Commands {
     },
 }
 
+#[derive(Subcommand)]
+enum ProfileCommands {
+    #[clap(about = "List profiles")]
+    List,
+    #[clap(about = "Show one profile")]
+    Show { profile: String },
+}
+
+#[derive(Subcommand)]
+enum BenchmarkCommands {
+    #[clap(about = "Benchmark installed app discovery cold and warm/cache paths")]
+    Discovery,
+    #[clap(about = "Benchmark profile launch dispatch time")]
+    ProfileLaunch {
+        profile: String,
+        #[clap(
+            long,
+            help = "Force launch applications even if they are already running"
+        )]
+        force: bool,
+    },
+}
+
 fn main() -> io::Result<()> {
-    fn create_desktop(config: &Config, env: &str, icon: Option<&str>) -> io::Result<()> {
-        if !config.environments.contains_key(env) {
-            println!("Environment '{}' not found.", env);
-            return Ok(());
-        }
-
-        platform::create_desktop_entry(env, icon)?;
-        println!("Desktop entry created for environment '{}'.", env);
-        Ok(())
-    }
-
     let cli = Cli::parse();
 
-    // Handle completions command early, before any logging or config loading
-    if let Commands::Completions { shell } = &cli.command {
+    if let Some(Commands::Completions { shell }) = &cli.command {
         let mut cmd = Cli::command();
         eprintln!("Generating completion file for {shell}...");
         print_completions(*shell, &mut cmd);
         return Ok(());
     }
 
-    SimpleLogger::new().init().unwrap();
-    //info!("Starting application");
+    let config_path = cli
+        .config_path
+        .clone()
+        .unwrap_or_else(profile::default_config_path);
 
-    let config_dir = dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("clovis");
-    std::fs::create_dir_all(&config_dir)?;
-    let config_path = config_dir.join("config.yaml");
+    if cli.command.is_none() || matches!(cli.command, Some(Commands::Gui)) {
+        return gui::run_gui(config_path).map_err(|err| io::Error::new(io::ErrorKind::Other, err));
+    }
+
+    let _ = SimpleLogger::new().init();
+    profile::ensure_config_parent(&config_path)?;
 
     let mut config = load_config(&config_path).unwrap_or_else(|_| {
         info!("Creating new config as loading failed");
@@ -144,22 +206,13 @@ fn main() -> io::Result<()> {
         }
     });
 
-    match &cli.command {
-        Commands::List { format } => {
-            let apps = platform::find_available_apps_with_paths();
-            let format = match format.to_lowercase().as_str() {
-                "pretty" => platform::AppListFormat::Pretty,
-                "raw" => platform::AppListFormat::Raw,
-                "fzf" => platform::AppListFormat::Fzf,
-                _ => {
-                    println!("Invalid format. Using 'pretty' format.");
-                    platform::AppListFormat::Pretty
-                }
-            };
-            println!("{}", platform::format_app_list(&apps, format));
+    match cli.command.expect("handled GUI and completions above") {
+        Commands::Gui => unreachable!(),
+        Commands::List { format, refresh } | Commands::ListInstalledApps { format, refresh } => {
+            handle_list_command(&format, refresh);
         }
         Commands::Search { query } => {
-            handle_search_command(query);
+            handle_search_command(&query);
         }
         Commands::Snapshot => {
             handle_snapshot_command();
@@ -170,13 +223,27 @@ fn main() -> io::Result<()> {
                 println!("  - {}", app);
             }
         }
-        Commands::Show => show_config(&config),
+        Commands::Show {
+            profile: profile_name,
+        } => match profile_name {
+            Some(name) => inspect_profile(&config, &name),
+            None => show_config(&config),
+        },
+        Commands::Inspect { profile } => inspect_profile(&config, &profile),
+        Commands::Profiles { command } => match command {
+            ProfileCommands::List => {
+                for name in profile::profile_names(&config) {
+                    println!("{name}");
+                }
+            }
+            ProfileCommands::Show { profile } => inspect_profile(&config, &profile),
+        },
         Commands::Launch { env, force } => {
-            handle_launch_command(&config, env, *force)?;
+            handle_launch_command(&config, &env, force)?;
         }
         Commands::Validate => validate_config(&config),
         Commands::Edit { env, action, app } => {
-            if handle_edit_command(&mut config, env, action, app)? {
+            if handle_edit_command(&mut config, &env, &action, &app)? {
                 save_config(&config_path, &config)?;
             } else {
                 info!("No changes made to the config");
@@ -187,24 +254,74 @@ fn main() -> io::Result<()> {
             generate_config(&config_path)?;
         }
         Commands::CreateDesktop { env, icon } => {
-            create_desktop(&config, env, icon.as_deref())?;
+            create_desktop(&config, &env, icon.as_deref())?;
         }
-        Commands::Completions { .. } => {
-            // Handled early in main, before logger initialization
-            unreachable!()
-        }
+        Commands::Benchmark { command } => match command {
+            BenchmarkCommands::Discovery => {
+                let bench = benchmark_discovery();
+                print!("{}", format_discovery_benchmark(&bench));
+            }
+            BenchmarkCommands::ProfileLaunch { profile, force } => {
+                match benchmark_profile_launch(&config, &profile, force) {
+                    Ok(bench) => print!("{}", format_profile_launch_benchmark(&bench)),
+                    Err(err) => println!("{err}"),
+                }
+            }
+        },
+        Commands::Completions { .. } => unreachable!(),
     }
 
     Ok(())
 }
 
+fn create_desktop(config: &Config, env: &str, icon: Option<&str>) -> io::Result<()> {
+    if !config.environments.contains_key(env) {
+        println!("Environment '{}' not found.", env);
+        return Ok(());
+    }
+
+    platform::create_desktop_entry(env, icon)?;
+    println!("Desktop entry created for environment '{}'.", env);
+    Ok(())
+}
+
+fn handle_list_command(format: &str, refresh: bool) {
+    let report = discover_installed_apps(!refresh);
+    for error in report.errors {
+        eprintln!("Warning: {error}");
+    }
+    let apps: Vec<_> = report
+        .apps
+        .into_iter()
+        .map(|app| platform::AppInfo {
+            name: app.name,
+            path: app.path,
+        })
+        .collect();
+    let format = match format.to_lowercase().as_str() {
+        "pretty" => platform::AppListFormat::Pretty,
+        "raw" => platform::AppListFormat::Raw,
+        "fzf" => platform::AppListFormat::Fzf,
+        _ => platform::AppListFormat::Pretty,
+    };
+    println!("{}", platform::format_app_list(&apps, format));
+}
+
 fn handle_search_command(query: &str) {
-    let apps = platform::find_available_apps_with_paths();
+    let report = discover_installed_apps(true);
     let query_lower = query.to_lowercase();
 
-    let matches: Vec<_> = apps
+    let matches: Vec<_> = report
+        .apps
         .iter()
-        .filter(|app| app.name.to_lowercase().contains(&query_lower))
+        .filter(|app| {
+            app.name.to_lowercase().contains(&query_lower)
+                || app
+                    .launch_target
+                    .to_string_lossy()
+                    .to_lowercase()
+                    .contains(&query_lower)
+        })
         .collect();
 
     if matches.is_empty() {
@@ -212,27 +329,20 @@ fn handle_search_command(query: &str) {
         return;
     }
 
-    println!("Found {} application(s) matching '{}':\n", matches.len(), query);
+    println!(
+        "Found {} application(s) matching '{}':\n",
+        matches.len(),
+        query
+    );
 
     for app in matches {
         println!("Name: {}", app.name);
         println!("Path: {}", app.path.display());
-
-        // Try to extract additional info from .desktop files on Linux
-        if !cfg!(target_os = "windows") && app.path.extension().and_then(|s| s.to_str()) == Some("desktop") {
-            if let Ok(content) = std::fs::read_to_string(&app.path) {
-                for line in content.lines() {
-                    if let Some(display_name) = line.strip_prefix("Name=") {
-                        println!("Display Name: {}", display_name);
-                    } else if let Some(comment) = line.strip_prefix("Comment=") {
-                        println!("Description: {}", comment);
-                    } else if let Some(exec) = line.strip_prefix("Exec=") {
-                        println!("Executable: {}", exec);
-                    }
-                }
-            }
+        println!("Launch Target: {}", app.launch_target.display());
+        println!("Source: {}", app.source);
+        if !app.provenance.is_empty() {
+            println!("Provenance: {}", app.provenance.join(" | "));
         }
-
         println!();
     }
 }
@@ -258,7 +368,6 @@ fn handle_edit_command(
 
     match action {
         "set" => {
-            // Read apps from stdin
             let stdin = io::stdin();
             let reader = io::BufReader::new(stdin);
             let mut new_apps = Vec::new();
@@ -267,15 +376,23 @@ fn handle_edit_command(
                 let line = line?;
                 let app_name = line.trim();
                 if !app_name.is_empty() {
-                    let normalized_app = platform::strip_platform_extension(app_name);
-                    new_apps.push(normalized_app.to_string());
+                    new_apps.push(platform::strip_platform_extension(app_name).to_string());
                 }
             }
 
-            // Replace the entire app list
-            config.environments.insert(env.to_string(), new_apps.clone());
-            println!("Set environment '{}' with {} applications", env, new_apps.len());
-            info!("Set environment '{}' with {} applications", env, new_apps.len());
+            config
+                .environments
+                .insert(env.to_string(), new_apps.clone());
+            println!(
+                "Set environment '{}' with {} applications",
+                env,
+                new_apps.len()
+            );
+            info!(
+                "Set environment '{}' with {} applications",
+                env,
+                new_apps.len()
+            );
         }
         "add" | "remove" => {
             let app = match app {
@@ -286,52 +403,30 @@ fn handle_edit_command(
                 }
             };
 
-            let app_available =
-                platform::is_desktop_file_available(app) || platform::is_command_available(app);
-
-            if !app_available {
-                println!(
-                    "Warning: Application '{}' is not installed or not in PATH.",
-                    app
-                );
-            }
-
             if action == "add" {
-                let apps = config
-                    .environments
-                    .entry(env.to_string())
-                    .or_insert_with(Vec::new);
-                let normalized_app = platform::strip_platform_extension(app);
-                if apps
-                    .iter()
-                    .any(|a| platform::strip_platform_extension(a) == normalized_app)
-                {
-                    error!(
-                        "Application '{}' is already in environment '{}'",
-                        normalized_app, env
-                    );
+                if let Err(err) = profile::add_profile_app(config, env, app) {
+                    error!("{err}");
                     return Ok(false);
                 }
-                apps.push(normalized_app.to_string());
                 println!("Added '{}' to environment '{}'", app, env);
                 info!("Added '{}' to environment '{}'", app, env);
+            } else if let Err(err) = profile::remove_profile_app(config, env, app) {
+                println!("{err}");
+                return Ok(false);
             } else {
-                // remove
-                if let Some(apps) = config.environments.get_mut(env) {
-                    if let Some(pos) = apps.iter().position(|x| x == app) {
-                        apps.remove(pos);
-                        println!("Removed '{}' from environment '{}'", app, env);
-                        info!("Removed '{}' from environment '{}'", app, env);
-                    } else {
-                        println!("App '{}' not found in environment '{}'", app, env);
-                        return Ok(false);
-                    }
-                }
+                println!("Removed '{}' from environment '{}'", app, env);
+                info!("Removed '{}' from environment '{}'", app, env);
             }
         }
         _ => {
-            println!("Invalid action '{}'. Use 'add', 'remove', or 'set'.", action);
-            error!("Invalid action '{}'. Use 'add', 'remove', or 'set'.", action);
+            println!(
+                "Invalid action '{}'. Use 'add', 'remove', or 'set'.",
+                action
+            );
+            error!(
+                "Invalid action '{}'. Use 'add', 'remove', or 'set'.",
+                action
+            );
             return Ok(false);
         }
     }
@@ -352,11 +447,23 @@ fn open_config_in_editor(config_path: &PathBuf) -> io::Result<()> {
 }
 
 fn print_launch_help_and_available_environments(config: &Config) -> io::Result<()> {
-    println!("\nAvailable environments:");
-    for env in config.environments.keys() {
+    println!("\nAvailable profiles/environments:");
+    for env in profile::profile_names(config) {
         println!("  - {}", env);
     }
     Ok(())
+}
+
+fn inspect_profile(config: &Config, profile_name: &str) {
+    match profile::get_profile(config, profile_name) {
+        Some(profile) => {
+            println!("{}:", profile.name);
+            for app in profile.apps {
+                println!("  - {}", app);
+            }
+        }
+        None => println!("Profile '{}' not found.", profile_name),
+    }
 }
 
 fn handle_launch_command(config: &Config, env: &Option<String>, force: bool) -> io::Result<()> {
@@ -367,66 +474,34 @@ fn handle_launch_command(config: &Config, env: &Option<String>, force: bool) -> 
                 print_launch_help_and_available_environments(config)?;
                 return Ok(());
             }
-            launch_apps(config, env_name, force)
+            let discovery = discover_installed_apps(true);
+            let report = launch_profile(config, env_name, LaunchOptions { force }, &discovery.apps)
+                .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+            println!("Milestone: {}", report.milestone);
+            println!(
+                "Profile '{}' dispatched in {:.2} ms",
+                report.profile, report.total_dispatch_ms
+            );
+            for result in report.results {
+                if result.skipped {
+                    println!("Skipping: {} (already running)", result.name);
+                } else if result.success {
+                    println!("Launched: {} ({:.2} ms)", result.name, result.dispatch_ms);
+                } else {
+                    println!(
+                        "Failed to launch {}: {}",
+                        result.name,
+                        result.error.unwrap_or_else(|| "unknown error".to_string())
+                    );
+                }
+            }
+            Ok(())
         }
         None => {
             print_launch_help_and_available_environments(config)?;
             Ok(())
         }
     }
-}
-
-fn launch_apps(config: &Config, env: &str, force: bool) -> io::Result<()> {
-    if let Some(apps) = config.environments.get(env) {
-        for app in apps {
-            if !force && platform::is_app_running(app) {
-                println!("Skipping: {} (already running)", app);
-                continue;
-            }
-            println!("Launching: {}", app);
-            match platform::find_app_path(app) {
-                Some(app_path) => {
-                    let mut command = if cfg!(target_os = "windows") {
-                        //TODO: change this to not start cmd but use windows run command via windows.rs
-                        let mut cmd = ProcessCommand::new("cmd");
-                        cmd.args(["/C", "start", "", &app_path.to_string_lossy()]);
-                        cmd
-                    } else {
-                        if app_path.extension().and_then(|s| s.to_str()) == Some("desktop") {
-                            let mut cmd = ProcessCommand::new("gio");
-                            cmd.args(["launch", app_path.to_string_lossy().as_ref()]);
-                            cmd
-                        } else {
-                            ProcessCommand::new(&app_path)
-                        }
-                    };
-
-                    command.stdout(Stdio::null());
-                    command.stderr(Stdio::null());
-
-                    match command.spawn() {
-                        Ok(_) => {
-                            println!("Launched: {}", app);
-                            info!("Launched {} in the background", app);
-                        }
-                        Err(e) => {
-                            println!("Failed to launch {}: {}", app, e);
-                            error!("Failed to launch {}: {}", app, e);
-                        }
-                    }
-                }
-                None => {
-                    println!(
-                        "Could not find application '{}'. Make sure it is installed correctly.",
-                        app
-                    );
-                    error!("Could not find application path for '{}'", app);
-                }
-            }
-        }
-        info!("Launched apps for environment: {}", env);
-    }
-    Ok(())
 }
 
 fn print_completions<G: Generator>(gen: G, cmd: &mut Command) {
