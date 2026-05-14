@@ -8,6 +8,12 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LaunchOptions {
     pub force: bool,
@@ -121,7 +127,10 @@ fn is_url(value: &str) -> bool {
     let v = value.trim();
     if let Some(end) = v.find("://") {
         let scheme = &v[..end];
-        return scheme.bytes().next().is_some_and(|b| b.is_ascii_alphabetic())
+        return scheme
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_alphabetic())
             && scheme
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'.' | b'-'));
@@ -250,6 +259,7 @@ fn dispatch_launch(path: &PathBuf) -> io::Result<()> {
         } else {
             Command::new(path)
         };
+        hide_windows_console(&mut command);
         command
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -317,6 +327,11 @@ fn dispatch_url(url: &str) -> io::Result<()> {
 #[cfg(target_os = "windows")]
 fn is_shell_script_extension(ext: &str) -> bool {
     matches!(ext.to_lowercase().as_str(), "cmd" | "bat" | "ps1")
+}
+
+#[cfg(target_os = "windows")]
+fn hide_windows_console(command: &mut Command) {
+    command.creation_flags(CREATE_NO_WINDOW);
 }
 
 fn duration_ms(duration: Duration) -> f64 {

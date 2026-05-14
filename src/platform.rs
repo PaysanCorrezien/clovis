@@ -5,6 +5,12 @@ use std::io;
 use std::process::{Command, Stdio};
 use std::{env, path::PathBuf};
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 pub fn is_command_available(cmd: &str) -> bool {
     if cfg!(target_os = "windows") {
         Command::new("where")
@@ -368,10 +374,9 @@ $Shortcut.Save()
     );
 
     // Execute the PowerShell script
-    let status = Command::new("powershell")
-        .arg("-Command")
-        .arg(&ps_script)
-        .status()?;
+    let mut command = Command::new("powershell");
+    hide_windows_console(&mut command);
+    let status = command.arg("-Command").arg(&ps_script).status()?;
 
     if !status.success() {
         return Err(io::Error::new(
@@ -381,6 +386,11 @@ $Shortcut.Save()
     }
 
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn hide_windows_console(command: &mut Command) {
+    command.creation_flags(CREATE_NO_WINDOW);
 }
 
 fn get_linux_applications_dir() -> io::Result<PathBuf> {

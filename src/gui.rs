@@ -6,7 +6,7 @@ use iced::widget::{
     button, column, container, image, pick_list, row, scrollable, text, text_input,
 };
 use iced::{
-    application, border, keyboard, Background, Color, Element, Length, Padding, Shadow,
+    application, border, keyboard, window, Background, Color, Element, Length, Padding, Shadow,
     Subscription, Task, Theme, Vector,
 };
 use std::collections::HashSet;
@@ -34,9 +34,14 @@ const TEXT: Color = Color::from_rgb(0.925, 0.925, 0.937); // #ececef
 const TEXT_DIM: Color = Color::from_rgb(0.62, 0.63, 0.66);
 const MUTED: Color = Color::from_rgb(0.62, 0.63, 0.66);
 const FAINT: Color = Color::from_rgb(0.42, 0.43, 0.47);
+const CLOVIS_ICON: &[u8] = include_bytes!("../.assets/clovis-icon.png");
 
 pub fn run_gui(config_path: PathBuf) -> iced::Result {
     application("Clovis", ClovisGui::update, ClovisGui::view)
+        .window(window::Settings {
+            icon: window::icon::from_file_data(CLOVIS_ICON, None).ok(),
+            ..window::Settings::default()
+        })
         .theme(|_| Theme::Dark)
         .subscription(ClovisGui::subscription)
         .run_with(|| ClovisGui::new(config_path))
@@ -238,7 +243,7 @@ impl ClovisGui {
             }
             Message::ActivateSelection => match self.tab {
                 Tab::Launch => {
-                    return self.launch_selected(false);
+                    return self.launch_selected(true);
                 }
                 Tab::Configure => {
                     let entry = self.app_search.trim().to_string();
@@ -497,6 +502,7 @@ impl ClovisGui {
         .style(segmented_control);
 
         let header = row![
+            app_logo(),
             tabs,
             text(&self.status).size(12).color(FAINT).width(Length::Fill),
         ]
@@ -555,11 +561,6 @@ impl ClovisGui {
             .push(command_action_row(
                 "Launch this profile",
                 "Enter",
-                Message::LaunchSelected { close_after: false },
-            ))
-            .push(command_action_row(
-                "Launch & close window",
-                "Ctrl+Enter",
                 Message::LaunchSelected { close_after: true },
             ));
 
@@ -579,7 +580,7 @@ impl ClovisGui {
                         },
                         &[
                             ("Up/Down", "Navigate"),
-                            ("Enter", "Launch"),
+                            ("Enter", "Launch & close"),
                             ("Alt+1-9", "Quick pick"),
                         ],
                     ),
@@ -698,8 +699,8 @@ impl ClovisGui {
 
         let mut installed_list = column![].spacing(2);
         if let Some(entry) = manual_entry.as_deref() {
-            let already_added = selected_names
-                .contains(&profile::normalize_app(entry).to_lowercase());
+            let already_added =
+                selected_names.contains(&profile::normalize_app(entry).to_lowercase());
             installed_list = installed_list.push(add_manual_row(entry, already_added));
         }
         for (index, app) in visible_apps.iter().enumerate() {
@@ -727,14 +728,17 @@ impl ClovisGui {
                     Some(ghost_button("Refresh", Message::RefreshApps)),
                 ),
                 container(
-                    text_input("Search apps  —  or paste a full path / URL + Enter", &self.app_search)
-                        .id(configure_search_id())
-                        .on_input(Message::AppSearchChanged)
-                        .on_submit(Message::ActivateSelection)
-                        .padding([8, 12])
-                        .size(14)
-                        .style(field_style)
-                        .width(Length::Fill),
+                    text_input(
+                        "Search apps  —  or paste a full path / URL + Enter",
+                        &self.app_search
+                    )
+                    .id(configure_search_id())
+                    .on_input(Message::AppSearchChanged)
+                    .on_submit(Message::ActivateSelection)
+                    .padding([8, 12])
+                    .size(14)
+                    .style(field_style)
+                    .width(Length::Fill),
                 )
                 .padding([0, 6]),
                 hairline(),
@@ -1007,14 +1011,23 @@ fn key_cap(label: &str) -> Element<'static, Message> {
         .into()
 }
 
-fn palette_footer<'a>(status: &'a str, keys: &[(&'static str, &'static str)]) -> Element<'a, Message> {
+fn palette_footer<'a>(
+    status: &'a str,
+    keys: &[(&'static str, &'static str)],
+) -> Element<'a, Message> {
     let status_text: Element<'a, Message> = if status.is_empty() {
         text("").width(Length::Fill).into()
     } else {
-        text(status).size(11).color(FAINT).width(Length::Fill).into()
+        text(status)
+            .size(11)
+            .color(FAINT)
+            .width(Length::Fill)
+            .into()
     };
 
-    let mut bar = row![status_text].spacing(14).align_y(iced::Alignment::Center);
+    let mut bar = row![status_text]
+        .spacing(14)
+        .align_y(iced::Alignment::Center);
     for (cap, label) in keys {
         bar = bar.push(
             row![key_cap(cap), text(*label).size(11).color(FAINT)]
@@ -1023,10 +1036,7 @@ fn palette_footer<'a>(status: &'a str, keys: &[(&'static str, &'static str)]) ->
         );
     }
 
-    container(bar)
-        .padding([8, 12])
-        .width(Length::Fill)
-        .into()
+    container(bar).padding([8, 12]).width(Length::Fill).into()
 }
 
 fn tab_button(label: &str, active: bool, message: Message) -> Element<'_, Message> {
@@ -1035,6 +1045,24 @@ fn tab_button(label: &str, active: bool, message: Message) -> Element<'_, Messag
         .style(tab_style(active))
         .on_press(message)
         .into()
+}
+
+fn app_logo() -> Element<'static, Message> {
+    let icon_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join(".assets")
+        .join("clovis-icon.png");
+
+    container(
+        image(icon_path)
+            .width(Length::Fixed(28.0))
+            .height(Length::Fixed(28.0)),
+    )
+    .width(Length::Fixed(34.0))
+    .height(Length::Fixed(34.0))
+    .center_x(Length::Fixed(34.0))
+    .center_y(Length::Fixed(34.0))
+    .style(app_logo_shell)
+    .into()
 }
 
 fn list_row<'a>(
@@ -1426,6 +1454,14 @@ fn action_icon(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(ACCENT_SOFT)),
         border: border::rounded(8),
+        ..container::Style::default()
+    }
+}
+
+fn app_logo_shell(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.075))),
+        border: border::rounded(8).color(HAIRLINE).width(1),
         ..container::Style::default()
     }
 }
