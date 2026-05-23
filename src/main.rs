@@ -8,7 +8,9 @@ use clovis::config::{
     generate_config, load_config, save_config, show_config, validate_config, Config,
 };
 use clovis::discovery::discover_installed_apps;
-use clovis::launch::{launch_profile, LaunchOptions};
+use clovis::launch::{
+    launch_plan, launch_profile, load_cached_launch_plan, save_launch_plan_cache, LaunchOptions,
+};
 use clovis::profile;
 use clovis::{gui, platform};
 use log::{error, info};
@@ -108,6 +110,11 @@ enum Commands {
             help = "Force launch applications even if they are already running"
         )]
         force: bool,
+        #[clap(
+            long,
+            help = "Use a pre-resolved launch plan cache and skip config/discovery parsing"
+        )]
+        fast: bool,
     },
 
     #[clap(about = "Validates the configuration to ensure all apps are installed")]
@@ -192,6 +199,15 @@ fn main() -> io::Result<()> {
         .clone()
         .unwrap_or_else(profile::default_config_path);
 
+    if let Some(Commands::Launch {
+        env: Some(env),
+        force,
+        fast: true,
+    }) = &cli.command
+    {
+        return handle_fast_launch_command(&config_path, env, *force);
+    }
+
     if cli.command.is_none() || matches!(cli.command, Some(Commands::Gui)) {
         return gui::run_gui(config_path).map_err(|err| io::Error::new(io::ErrorKind::Other, err));
     }
@@ -238,8 +254,8 @@ fn main() -> io::Result<()> {
             }
             ProfileCommands::Show { profile } => inspect_profile(&config, &profile),
         },
-        Commands::Launch { env, force } => {
-            handle_launch_command(&config, &env, force)?;
+        Commands::Launch { env, force, .. } => {
+            handle_launch_command(&config_path, &config, &env, force)?;
         }
         Commands::Validate => validate_config(&config),
         Commands::Edit { env, action, app } => {
@@ -254,7 +270,7 @@ fn main() -> io::Result<()> {
             generate_config(&config_path)?;
         }
         Commands::CreateDesktop { env, icon } => {
-            create_desktop(&config, &env, icon.as_deref())?;
+            create_desktop(&config_path, &config, &env, icon.as_deref())?;
         }
         Commands::Benchmark { command } => match command {
             BenchmarkCommands::Discovery => {
@@ -274,12 +290,19 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-fn create_desktop(config: &Config, env: &str, icon: Option<&str>) -> io::Result<()> {
+fn create_desktop(
+    config_path: &PathBuf,
+    config: &Config,
+    env: &str,
+    icon: Option<&str>,
+) -> io::Result<()> {
     if !config.environments.contains_key(env) {
         println!("Environment '{}' not found.", env);
         return Ok(());
     }
 
+    let discovery = discover_installed_apps(true);
+    let _ = save_launch_plan_cache(&config_path, config, &discovery.apps);
     platform::create_desktop_entry(env, icon)?;
     println!("Desktop entry created for environment '{}'.", env);
     Ok(())
@@ -466,7 +489,12 @@ fn inspect_profile(config: &Config, profile_name: &str) {
     }
 }
 
-fn handle_launch_command(config: &Config, env: &Option<String>, force: bool) -> io::Result<()> {
+fn handle_launch_command(
+    config_path: &PathBuf,
+    config: &Config,
+    env: &Option<String>,
+    force: bool,
+) -> io::Result<()> {
     match env {
         Some(env_name) => {
             if !config.environments.contains_key(env_name) {
@@ -475,6 +503,7 @@ fn handle_launch_command(config: &Config, env: &Option<String>, force: bool) -> 
                 return Ok(());
             }
             let discovery = discover_installed_apps(true);
+            let _ = save_launch_plan_cache(config_path, config, &discovery.apps);
             let report = launch_profile(config, env_name, LaunchOptions { force }, &discovery.apps)
                 .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
             println!("Milestone: {}", report.milestone);
@@ -502,6 +531,38 @@ fn handle_launch_command(config: &Config, env: &Option<String>, force: bool) -> 
             Ok(())
         }
     }
+}
+
+fn handle_fast_launch_command(config_path: &PathBuf, env: &str, force: bool) -> io::Result<()> {
+    let plan = match load_cached_launch_plan(config_path, env) {
+        Ok(plan) => plan,
+        Err(_) => {
+            let config = load_config(config_path)?;
+            let discovery = discover_installed_apps(true);
+            let _ = save_launch_plan_cache(config_path, &config, &discovery.apps);
+            load_cached_launch_plan(config_path, env)?
+        }
+    };
+    let report = launch_plan(plan, LaunchOptions { force });
+    println!("Milestone: {}", report.milestone);
+    println!(
+        "Profile '{}' dispatched in {:.2} ms",
+        report.profile, report.total_dispatch_ms
+    );
+    for result in report.results {
+        if result.skipped {
+            println!("Skipping: {} (already running)", result.name);
+        } else if result.success {
+            println!("Launched: {} ({:.2} ms)", result.name, result.dispatch_ms);
+        } else {
+            println!(
+                "Failed to launch {}: {}",
+                result.name,
+                result.error.unwrap_or_else(|| "unknown error".to_string())
+            );
+        }
+    }
+    Ok(())
 }
 
 fn print_completions<G: Generator>(gen: G, cmd: &mut Command) {

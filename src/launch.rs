@@ -2,11 +2,16 @@ use crate::config::Config;
 use crate::discovery::{find_app_by_name, AppInfo};
 use crate::platform;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
+
+const LAUNCH_PLAN_CACHE_FILE: &str = "launch-plans-v1.json";
+const FAST_LAUNCH_CACHE_DIR: &str = "fast-launch-v1";
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -31,6 +36,14 @@ pub struct LaunchPlanItem {
     pub name: String,
     pub launch_path: PathBuf,
     pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedLaunchPlans {
+    config_path: PathBuf,
+    config_len: u64,
+    config_modified_ms: u128,
+    profiles: HashMap<String, LaunchPlan>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,6 +174,129 @@ pub fn launch_profile(
 ) -> Result<ProfileLaunchReport, String> {
     let plan = build_launch_plan(config, profile, discovered_apps)?;
     Ok(launch_plan(plan, options))
+}
+
+pub fn launch_plan_cache_path() -> PathBuf {
+    if let Ok(cache_dir) = std::env::var("CLOVIS_CACHE_DIR") {
+        return PathBuf::from(cache_dir).join(LAUNCH_PLAN_CACHE_FILE);
+    }
+
+    dirs::cache_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("clovis")
+        .join(LAUNCH_PLAN_CACHE_FILE)
+}
+
+pub fn save_launch_plan_cache(
+    config_path: &Path,
+    config: &Config,
+    discovered_apps: &[AppInfo],
+) -> io::Result<()> {
+    let Some((config_len, config_modified_ms)) = config_fingerprint(config_path) else {
+        return Ok(());
+    };
+
+    let mut profiles = HashMap::new();
+    for profile in config.environments.keys() {
+        if let Ok(plan) = build_launch_plan(config, profile, discovered_apps) {
+            profiles.insert(profile.clone(), plan);
+        }
+    }
+
+    let cache = CachedLaunchPlans {
+        config_path: config_path.to_path_buf(),
+        config_len,
+        config_modified_ms,
+        profiles,
+    };
+    let path = launch_plan_cache_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let raw = serde_json::to_string(&cache)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    fs::write(path, raw).and_then(|_| {
+        save_fast_launch_cache(config_path, &cache.profiles, config_len, config_modified_ms)
+    })
+}
+
+pub fn load_cached_launch_plan(config_path: &Path, profile: &str) -> io::Result<LaunchPlan> {
+    let Some((config_len, config_modified_ms)) = config_fingerprint(config_path) else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "config file metadata unavailable",
+        ));
+    };
+
+    let raw = fs::read_to_string(launch_plan_cache_path())?;
+    let cache: CachedLaunchPlans = serde_json::from_str(&raw)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+
+    if cache.config_path != config_path
+        || cache.config_len != config_len
+        || cache.config_modified_ms != config_modified_ms
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "launch plan cache is stale",
+        ));
+    }
+
+    cache.profiles.get(profile).cloned().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("profile '{profile}' is not in launch plan cache"),
+        )
+    })
+}
+
+fn config_fingerprint(config_path: &Path) -> Option<(u64, u128)> {
+    let metadata = fs::metadata(config_path).ok()?;
+    let modified = metadata.modified().ok()?;
+    let modified_ms = modified.duration_since(UNIX_EPOCH).ok()?.as_millis();
+    Some((metadata.len(), modified_ms))
+}
+
+fn save_fast_launch_cache(
+    config_path: &Path,
+    profiles: &HashMap<String, LaunchPlan>,
+    config_len: u64,
+    config_modified_ms: u128,
+) -> io::Result<()> {
+    let dir = fast_launch_cache_dir();
+    fs::create_dir_all(&dir)?;
+    for (profile, plan) in profiles {
+        let path = dir.join(format!("{}.txt", profile_cache_key(profile)));
+        let mut raw = String::new();
+        raw.push_str(&format!("{}\n", config_path.display()));
+        raw.push_str(&format!("{config_len}\n"));
+        raw.push_str(&format!("{config_modified_ms}\n"));
+        for item in &plan.apps {
+            raw.push_str(&item.launch_path.to_string_lossy());
+            raw.push('\n');
+        }
+        fs::write(path, raw)?;
+    }
+    Ok(())
+}
+
+fn fast_launch_cache_dir() -> PathBuf {
+    if let Ok(cache_dir) = std::env::var("CLOVIS_CACHE_DIR") {
+        return PathBuf::from(cache_dir).join(FAST_LAUNCH_CACHE_DIR);
+    }
+
+    dirs::cache_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("clovis")
+        .join(FAST_LAUNCH_CACHE_DIR)
+}
+
+fn profile_cache_key(profile: &str) -> String {
+    profile
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 pub fn launch_plan(plan: LaunchPlan, options: LaunchOptions) -> ProfileLaunchReport {
@@ -410,5 +546,34 @@ mod tests {
         assert_eq!(plan.apps[0].launch_path, PathBuf::from(path));
         assert_eq!(plan.apps[0].source, "explicit_path");
         assert!(plan.missing.is_empty());
+    }
+
+    #[test]
+    fn saves_and_loads_profile_launch_plan_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("CLOVIS_CACHE_DIR", dir.path());
+        let config_path = dir.path().join("config.yaml");
+        std::fs::write(&config_path, "environments:\n  work:\n    - Editor\n").unwrap();
+        let config = Config {
+            environments: HashMap::from([("work".to_string(), vec!["Editor".to_string()])]),
+        };
+        let apps = vec![AppInfo {
+            id: "editor".to_string(),
+            name: "Editor".to_string(),
+            path: PathBuf::from("editor.lnk"),
+            launch_target: PathBuf::from("editor.exe"),
+            source: "start_menu".to_string(),
+            publisher: None,
+            provenance: vec!["editor.lnk".to_string()],
+            icon_path: None,
+        }];
+
+        save_launch_plan_cache(&config_path, &config, &apps).unwrap();
+        let plan = load_cached_launch_plan(&config_path, "work").unwrap();
+
+        assert_eq!(plan.profile, "work");
+        assert_eq!(plan.apps.len(), 1);
+        assert_eq!(plan.apps[0].launch_path, PathBuf::from("editor.exe"));
+        std::env::remove_var("CLOVIS_CACHE_DIR");
     }
 }

@@ -118,7 +118,7 @@ impl ClovisGui {
             configure_profile: None,
             tab: Tab::Launch,
             status: "Loading profiles".to_string(),
-            discovery_status: "Loading installed apps".to_string(),
+            discovery_status: "App cache loads when needed".to_string(),
             launch_status: String::new(),
             launch_query: String::new(),
             app_search: String::new(),
@@ -131,10 +131,7 @@ impl ClovisGui {
 
         (
             app,
-            Task::batch([
-                Task::perform(load_initial_state(config_path), Message::Loaded),
-                Task::perform(load_apps(true), Message::AppsLoaded),
-            ]),
+            Task::perform(load_initial_state(config_path), Message::Loaded),
         )
     }
 
@@ -256,7 +253,13 @@ impl ClovisGui {
             Message::SwitchTab(tab) => {
                 self.tab = tab;
                 if tab == Tab::Configure {
-                    text_input::focus(configure_search_id())
+                    let focus = text_input::focus(configure_search_id());
+                    if self.installed_apps.is_empty() {
+                        self.discovery_status = "Loading installed app cache".to_string();
+                        Task::batch([focus, Task::perform(load_apps(true), Message::AppsLoaded)])
+                    } else {
+                        focus
+                    }
                 } else {
                     Task::none()
                 }
@@ -407,10 +410,17 @@ impl ClovisGui {
             return Task::none();
         };
         let config = self.config.clone();
-        let apps = self.installed_apps.clone();
+        let cached_apps = self.installed_apps.clone();
         self.launch_status = format!("Launching {profile}");
         Task::perform(
-            async move { launch_profile(&config, &profile, LaunchOptions { force: true }, &apps) },
+            async move {
+                let apps = if cached_apps.is_empty() {
+                    load_apps(true).await.unwrap_or_default()
+                } else {
+                    cached_apps
+                };
+                launch_profile(&config, &profile, LaunchOptions { force: true }, &apps)
+            },
             move |result| Message::LaunchFinished(result, close_after),
         )
     }

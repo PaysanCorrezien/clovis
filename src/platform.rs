@@ -338,7 +338,12 @@ fn create_windows_desktop_entry(env: &str, icon: Option<&str>) -> std::io::Resul
     );
 
     let current_exe = std::env::current_exe()?;
-    let target_path = current_exe.to_str().unwrap_or("clovis.exe");
+    let launcher_exe = current_exe
+        .parent()
+        .map(|parent| parent.join("clovis-launcher.exe"))
+        .filter(|path| path.exists())
+        .unwrap_or(current_exe);
+    let target_path = launcher_exe.to_str().unwrap_or("clovis-launcher.exe");
 
     let icon_path = if let Some(icon_input) = icon {
         let resolver = IconResolver::new()?;
@@ -363,7 +368,7 @@ fn create_windows_desktop_entry(env: &str, icon: Option<&str>) -> std::io::Resul
 $WshShell = New-Object -comObject WScript.Shell
 $Shortcut = $WshShell.CreateShortcut("{}")
 $Shortcut.TargetPath = "{}"
-$Shortcut.Arguments = "launch {}"
+$Shortcut.Arguments = "{}"
 $Shortcut.IconLocation = "{}"
 $Shortcut.Save()
 "#,
@@ -411,7 +416,12 @@ fn create_linux_desktop_entry(env: &str, icon: Option<&str>) -> std::io::Result<
     let applications_dir = get_linux_applications_dir()?;
     let desktop_path = applications_dir.join(format!("clovis-{}.desktop", env));
     let current_exe = std::env::current_exe()?;
-    let exec_path = current_exe.to_string_lossy().replace(' ', "\\ ");
+    let launcher_exe = current_exe
+        .parent()
+        .map(|parent| parent.join("clovis-launcher"))
+        .filter(|path| path.exists())
+        .unwrap_or(current_exe);
+    let exec_path = launcher_exe.to_string_lossy().replace(' ', "\\ ");
 
     let icon_path = if let Some(icon_input) = icon {
         let resolver = IconResolver::new()?;
@@ -434,7 +444,7 @@ fn create_linux_desktop_entry(env: &str, icon: Option<&str>) -> std::io::Result<
         r#"[Desktop Entry]
 Version=1.0
 Name=Clovis {}
-Exec={} launch {}
+Exec={} {}
 Icon={}
 Type=Application
 Terminal=false
